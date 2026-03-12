@@ -1,13 +1,22 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, addMonths, setHours, setMinutes, isWeekend, getYear, startOfWeek, endOfWeek } from 'date-fns';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, addMonths, setHours, setMinutes, isWeekend, getYear } from 'date-fns';
 import { uk } from 'date-fns/locale';
-import { ChevronLeft, ChevronRight, Settings, Users, X, Trash2, Plus } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Settings, Users, X, Trash2, LogOut, Calendar } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
 export function cn(...inputs: (string | undefined | null | false)[]) {
   return twMerge(clsx(inputs));
 }
+
+// ─── Types ───────────────────────────────────────────────────
+
+type GoogleUser = {
+  email: string;
+  name: string;
+  picture: string;
+  sub: string;
+};
 
 type Member = {
   id: number;
@@ -17,7 +26,7 @@ type Member = {
   color: string;
 };
 
-type Event = {
+type CalendarEvent = {
   id: number;
   member_id: number;
   title: string;
@@ -33,6 +42,8 @@ type Holiday = {
   countryCode: string;
 };
 
+// ─── Constants ───────────────────────────────────────────────
+
 const DEFAULT_MEMBERS: Member[] = [
   { id: 1, name: 'Папа', role: 'parent', avatar_url: 'https://api.dicebear.com/9.x/avataaars/svg?seed=Dad', color: '#3b82f6' },
   { id: 2, name: 'Мама', role: 'parent', avatar_url: 'https://api.dicebear.com/9.x/avataaars/svg?seed=Mom', color: '#ec4899' },
@@ -43,7 +54,8 @@ const DEFAULT_MEMBERS: Member[] = [
   { id: 7, name: 'Дитина 5', role: 'child', avatar_url: 'https://api.dicebear.com/9.x/avataaars/svg?seed=Child5', color: '#06b6d4' },
 ];
 
-// localStorage helpers
+// ─── Storage helpers ─────────────────────────────────────────
+
 function loadFromStorage<T>(key: string, fallback: T): T {
   try {
     const data = localStorage.getItem(key);
@@ -57,7 +69,6 @@ function saveToStorage(key: string, data: unknown) {
   localStorage.setItem(key, JSON.stringify(data));
 }
 
-// Try API first, fallback to localStorage
 async function tryApi<T>(url: string, options?: RequestInit): Promise<{ ok: boolean; data?: T }> {
   try {
     const res = await fetch(url, options);
@@ -65,15 +76,186 @@ async function tryApi<T>(url: string, options?: RequestInit): Promise<{ ok: bool
       const data = await res.json();
       return { ok: true, data };
     }
-  } catch {
-    // API not available
-  }
+  } catch { /* API not available */ }
   return { ok: false };
 }
 
+// ─── Google Auth helpers ─────────────────────────────────────
+
+function decodeJwtPayload(token: string): GoogleUser | null {
+  try {
+    const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(
+      atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join('')
+    );
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function getGoogleClientId(): string {
+  return (
+    (typeof process !== 'undefined' && process.env?.VITE_GOOGLE_CLIENT_ID) ||
+    loadFromStorage<string>('calendar_google_client_id', '')
+  );
+}
+
+// ─── Google global types ─────────────────────────────────────
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: any) => void;
+          renderButton: (el: HTMLElement, config: any) => void;
+          prompt: () => void;
+          revoke: (email: string, cb: () => void) => void;
+          disableAutoSelect: () => void;
+        };
+      };
+    };
+  }
+}
+
+// ─── Login Page ──────────────────────────────────────────────
+
+function LoginPage({ onLogin }: { onLogin: (user: GoogleUser) => void }) {
+  const googleBtnRef = useRef<HTMLDivElement>(null);
+  const [clientId, setClientId] = useState(() => getGoogleClientId());
+  const [showSetup, setShowSetup] = useState(!clientId);
+  const [gsiReady, setGsiReady] = useState(false);
+
+  useEffect(() => {
+    const check = () => {
+      if (window.google?.accounts?.id) {
+        setGsiReady(true);
+        return true;
+      }
+      return false;
+    };
+    if (check()) return;
+    const interval = setInterval(() => { if (check()) clearInterval(interval); }, 200);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!gsiReady || !clientId || !googleBtnRef.current) return;
+
+    window.google!.accounts.id.initialize({
+      client_id: clientId,
+      callback: (response: { credential: string }) => {
+        const user = decodeJwtPayload(response.credential);
+        if (user) {
+          saveToStorage('calendar_user', user);
+          onLogin(user);
+        }
+      },
+    });
+
+    window.google!.accounts.id.renderButton(googleBtnRef.current, {
+      theme: 'outline',
+      size: 'large',
+      shape: 'rectangular',
+      text: 'signin_with',
+      locale: 'uk',
+      width: 300,
+    });
+  }, [gsiReady, clientId, onLogin]);
+
+  const saveClientId = () => {
+    if (clientId.trim()) {
+      saveToStorage('calendar_google_client_id', clientId.trim());
+      setShowSetup(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-pink-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center justify-center w-20 h-20 bg-indigo-100 rounded-2xl mb-4">
+            <Calendar className="w-10 h-10 text-indigo-600" />
+          </div>
+          <h1 className="text-3xl font-bold text-slate-900 mb-2">Berbeha Calendar</h1>
+          <p className="text-slate-500">Сімейний календар з Telegram ботом</p>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-8">
+          {showSetup || !clientId ? (
+            <div className="space-y-4">
+              <h2 className="text-lg font-semibold text-slate-800 text-center">Налаштування Google Sign-In</h2>
+              <p className="text-sm text-slate-500 text-center">
+                Введіть Google OAuth Client ID для авторизації
+              </p>
+              <input
+                type="text"
+                value={clientId}
+                onChange={e => setClientId(e.target.value)}
+                className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
+                placeholder="xxxxxxx.apps.googleusercontent.com"
+              />
+              <button
+                onClick={saveClientId}
+                disabled={!clientId.trim()}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-xl transition-colors disabled:opacity-50"
+              >
+                Зберегти та продовжити
+              </button>
+              <div className="pt-4 border-t border-slate-100">
+                <details className="text-sm text-slate-500">
+                  <summary className="cursor-pointer font-medium text-slate-600 hover:text-slate-800">Як отримати Client ID?</summary>
+                  <ol className="mt-3 space-y-2 list-decimal list-inside text-xs leading-relaxed">
+                    <li>Перейдіть до <strong>Google Cloud Console</strong> &rarr; APIs & Services &rarr; Credentials</li>
+                    <li>Створіть <strong>OAuth 2.0 Client ID</strong> (тип: Web application)</li>
+                    <li>В <strong>Authorized JavaScript origins</strong> додайте:<br/>
+                      <code className="bg-slate-100 px-1.5 py-0.5 rounded text-indigo-600">https://berbeha-calendar.netlify.app</code><br/>
+                      <code className="bg-slate-100 px-1.5 py-0.5 rounded text-indigo-600">http://localhost:3000</code>
+                    </li>
+                    <li>Скопіюйте <strong>Client ID</strong> та вставте вище</li>
+                  </ol>
+                </details>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <h2 className="text-lg font-semibold text-slate-800 text-center">Увійти в календар</h2>
+
+              <div className="flex justify-center">
+                <div ref={googleBtnRef} />
+              </div>
+
+              {!gsiReady && (
+                <p className="text-sm text-slate-400 text-center">Завантаження Google Sign-In...</p>
+              )}
+
+              <div className="text-center">
+                <button
+                  onClick={() => setShowSetup(true)}
+                  className="text-xs text-slate-400 hover:text-slate-600 transition-colors"
+                >
+                  Змінити Client ID
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <p className="text-center text-xs text-slate-400 mt-6">
+          Berbeha Family Calendar &copy; 2026
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App (after auth) ───────────────────────────────────
+
 export default function App() {
+  const [user, setUser] = useState<GoogleUser | null>(() => loadFromStorage<GoogleUser | null>('calendar_user', null));
   const [members, setMembers] = useState<Member[]>(() => loadFromStorage('calendar_members', DEFAULT_MEMBERS));
-  const [events, setEvents] = useState<Event[]>(() => loadFromStorage('calendar_events', []));
+  const [events, setEvents] = useState<CalendarEvent[]>(() => loadFromStorage('calendar_events', []));
   const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [activeTab, setActiveTab] = useState<'calendar' | 'settings' | 'members'>('calendar');
   const [monthOffset, setMonthOffset] = useState(() => loadFromStorage('calendar_month_offset', 0));
@@ -81,8 +263,82 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
   const [useApi, setUseApi] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
 
-  // Check if API is available on mount
+  // ── If not logged in, show login page ──
+  if (!user) {
+    return <LoginPage onLogin={setUser} />;
+  }
+
+  // ── Auth is done, render calendar ──
+  return (
+    <CalendarApp
+      user={user}
+      members={members}
+      setMembers={setMembers}
+      events={events}
+      setEvents={setEvents}
+      holidays={holidays}
+      setHolidays={setHolidays}
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      monthOffset={monthOffset}
+      setMonthOffset={setMonthOffset}
+      isModalOpen={isModalOpen}
+      setIsModalOpen={setIsModalOpen}
+      selectedDate={selectedDate}
+      setSelectedDate={setSelectedDate}
+      selectedMemberId={selectedMemberId}
+      setSelectedMemberId={setSelectedMemberId}
+      useApi={useApi}
+      setUseApi={setUseApi}
+      showUserMenu={showUserMenu}
+      setShowUserMenu={setShowUserMenu}
+      onLogout={() => {
+        localStorage.removeItem('calendar_user');
+        if (window.google?.accounts?.id) {
+          window.google.accounts.id.disableAutoSelect();
+        }
+        setUser(null);
+        setShowUserMenu(false);
+      }}
+    />
+  );
+}
+
+// ─── Calendar App (authenticated) ────────────────────────────
+
+function CalendarApp({
+  user, members, setMembers, events, setEvents, holidays, setHolidays,
+  activeTab, setActiveTab, monthOffset, setMonthOffset,
+  isModalOpen, setIsModalOpen, selectedDate, setSelectedDate,
+  selectedMemberId, setSelectedMemberId,
+  useApi, setUseApi, showUserMenu, setShowUserMenu, onLogout
+}: {
+  user: GoogleUser;
+  members: Member[];
+  setMembers: React.Dispatch<React.SetStateAction<Member[]>>;
+  events: CalendarEvent[];
+  setEvents: React.Dispatch<React.SetStateAction<CalendarEvent[]>>;
+  holidays: Holiday[];
+  setHolidays: React.Dispatch<React.SetStateAction<Holiday[]>>;
+  activeTab: 'calendar' | 'settings' | 'members';
+  setActiveTab: React.Dispatch<React.SetStateAction<'calendar' | 'settings' | 'members'>>;
+  monthOffset: number;
+  setMonthOffset: React.Dispatch<React.SetStateAction<number>>;
+  isModalOpen: boolean;
+  setIsModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  selectedDate: Date;
+  setSelectedDate: React.Dispatch<React.SetStateAction<Date>>;
+  selectedMemberId: number | null;
+  setSelectedMemberId: React.Dispatch<React.SetStateAction<number | null>>;
+  useApi: boolean;
+  setUseApi: React.Dispatch<React.SetStateAction<boolean>>;
+  showUserMenu: boolean;
+  setShowUserMenu: React.Dispatch<React.SetStateAction<boolean>>;
+  onLogout: () => void;
+}) {
+
   useEffect(() => {
     tryApi('/api/members').then(result => {
       if (result.ok) {
@@ -101,12 +357,11 @@ export default function App() {
 
   const fetchEvents = useCallback(async () => {
     if (useApi) {
-      const result = await tryApi<Event[]>('/api/events');
+      const result = await tryApi<CalendarEvent[]>('/api/events');
       if (result.ok && result.data) setEvents(result.data);
     }
   }, [useApi]);
 
-  // Save to localStorage when data changes
   useEffect(() => { saveToStorage('calendar_members', members); }, [members]);
   useEffect(() => { saveToStorage('calendar_events', events); }, [events]);
   useEffect(() => { saveToStorage('calendar_month_offset', monthOffset); }, [monthOffset]);
@@ -163,7 +418,7 @@ export default function App() {
     setIsModalOpen(true);
   };
 
-  const addEvent = async (event: Omit<Event, 'id'>) => {
+  const addEvent = async (event: Omit<CalendarEvent, 'id'>) => {
     if (useApi) {
       await tryApi('/api/events', {
         method: 'POST',
@@ -172,7 +427,7 @@ export default function App() {
       });
       fetchEvents();
     } else {
-      const newEvent: Event = { ...event, id: Date.now() };
+      const newEvent: CalendarEvent = { ...event, id: Date.now() };
       setEvents(prev => [...prev, newEvent]);
     }
   };
@@ -183,9 +438,10 @@ export default function App() {
 
   return (
     <div className="h-screen bg-slate-50 text-slate-900 font-sans flex flex-col overflow-hidden">
+      {/* ── Header ── */}
       <header className="bg-white shadow-sm border-b border-slate-200 p-2 md:p-3 flex items-center justify-between shrink-0 gap-2">
         <div className="flex items-center gap-2 md:gap-4">
-          <h1 className="text-lg md:text-xl font-bold text-slate-800 tracking-tight hidden sm:block">📅 Сімейний Календар</h1>
+          <h1 className="text-lg md:text-xl font-bold text-slate-800 tracking-tight hidden sm:block">Berbeha Calendar</h1>
           {activeTab === 'calendar' && (
             <div className="flex items-center gap-1 md:gap-2 bg-slate-50 px-1 md:px-2 py-1 rounded-lg border border-slate-100">
               <button onClick={prevMonth} className="p-1 md:p-1.5 rounded-full hover:bg-slate-200 transition-colors">
@@ -200,9 +456,10 @@ export default function App() {
             </div>
           )}
         </div>
+
         <div className="flex items-center gap-1 md:gap-2">
           {!useApi && (
-            <span className="text-[10px] md:text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-medium">Demo режим</span>
+            <span className="text-[10px] md:text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-medium hidden sm:inline">Demo</span>
           )}
           <button onClick={() => setActiveTab('calendar')} className={cn("px-2 py-1.5 md:px-3 md:py-2 rounded-lg font-medium transition-colors text-xs md:text-sm", activeTab === 'calendar' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-100")}>
             Календар
@@ -213,15 +470,55 @@ export default function App() {
           <button onClick={() => setActiveTab('settings')} className={cn("p-1.5 md:p-2 rounded-lg transition-colors", activeTab === 'settings' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-100")}>
             <Settings className="w-4 h-4 md:w-5 md:h-5" />
           </button>
+
+          {/* User avatar & menu */}
+          <div className="relative ml-1 md:ml-2">
+            <button
+              onClick={() => setShowUserMenu(!showUserMenu)}
+              className="flex items-center gap-2 p-1 rounded-full hover:bg-slate-100 transition-colors"
+            >
+              <img
+                src={user.picture}
+                alt={user.name}
+                className="w-7 h-7 md:w-8 md:h-8 rounded-full border-2 border-indigo-200"
+                referrerPolicy="no-referrer"
+              />
+            </button>
+
+            {showUserMenu && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
+                <div className="absolute right-0 top-full mt-2 w-64 bg-white rounded-xl shadow-lg border border-slate-200 z-50 overflow-hidden">
+                  <div className="p-4 border-b border-slate-100 bg-slate-50">
+                    <div className="flex items-center gap-3">
+                      <img src={user.picture} alt={user.name} className="w-10 h-10 rounded-full" referrerPolicy="no-referrer" />
+                      <div className="min-w-0">
+                        <p className="font-semibold text-sm text-slate-800 truncate">{user.name}</p>
+                        <p className="text-xs text-slate-500 truncate">{user.email}</p>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={onLogout}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Вийти
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
+      {/* ── Main content ── */}
       <main className="flex-1 p-2 md:p-4 w-full flex flex-col min-h-0">
         {activeTab === 'calendar' && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col flex-1 min-h-0 overflow-hidden">
             <div className="flex flex-col flex-1 min-h-0">
               <div className="flex flex-col flex-1 min-h-0 border-t border-slate-200">
-                {/* Header */}
+                {/* Table Header */}
                 <div className="flex bg-slate-50 border-b border-slate-200 shadow-[0_1px_2px_rgba(0,0,0,0.05)] shrink-0">
                   <div className="w-20 md:w-28 shrink-0 p-1 md:p-2 text-center font-semibold text-slate-500 border-r border-slate-200 flex items-center justify-center text-[10px] md:text-xs">Дата</div>
                   {members.map(m => (
@@ -232,7 +529,7 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Body */}
+                {/* Table Body */}
                 <div className="flex flex-col flex-1 min-h-0 overflow-y-auto">
                   {eachDayOfInterval({ start: monthStart, end: monthEnd }).map(day => {
                     const isToday = isSameDay(day, new Date());
@@ -240,7 +537,7 @@ export default function App() {
                     const dayHolidays = holidays.filter(h => h.date === format(day, 'yyyy-MM-dd'));
                     const dayEvents = events.filter(e => isSameDay(new Date(e.start_time), day));
 
-                    const renderEvents = (cellEvents: Event[], member?: Member) => (
+                    const renderEvents = (cellEvents: CalendarEvent[], member?: Member) => (
                       <div className="flex flex-wrap gap-0.5 h-full overflow-hidden items-start content-start">
                         {cellEvents.map(event => (
                           <div
@@ -270,7 +567,6 @@ export default function App() {
 
                     return (
                       <div key={day.toString()} className={cn("flex flex-1 border-b border-slate-100 hover:bg-slate-50/50 transition-colors min-h-[32px]", isToday && "bg-indigo-50/30", isWknd && "bg-pink-50/30")}>
-                        {/* Date Cell */}
                         <div className={cn("w-20 md:w-28 shrink-0 border-r border-slate-100 flex flex-row", isWknd ? "bg-pink-100/50" : (isToday ? "bg-indigo-50" : "bg-white"))}>
                           <div className="w-4 md:w-5 shrink-0 flex items-center justify-center border-r border-slate-100/50 bg-slate-50/30">
                             {(day.getDay() === 1 || day.getDate() === 1) && (
@@ -300,7 +596,6 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Member Cells */}
                         {members.map(m => (
                           <div
                             key={m.id}
@@ -334,7 +629,6 @@ export default function App() {
 
       {isModalOpen && (
         <EventModal
-          isOpen={isModalOpen}
           onClose={() => setIsModalOpen(false)}
           selectedDate={selectedDate}
           selectedMemberId={selectedMemberId}
@@ -346,13 +640,14 @@ export default function App() {
   );
 }
 
-function EventModal({ isOpen, onClose, selectedDate, selectedMemberId, members, onSave }: {
-  isOpen: boolean;
+// ─── Event Modal ─────────────────────────────────────────────
+
+function EventModal({ onClose, selectedDate, selectedMemberId, members, onSave }: {
   onClose: () => void;
   selectedDate: Date;
   selectedMemberId: number | null;
   members: Member[];
-  onSave: (event: Omit<Event, 'id'>) => void;
+  onSave: (event: Omit<CalendarEvent, 'id'>) => void;
 }) {
   const [title, setTitle] = useState('');
   const [time, setTime] = useState('12:00');
@@ -364,10 +659,8 @@ function EventModal({ isOpen, onClose, selectedDate, selectedMemberId, members, 
     e.preventDefault();
     if (!title || memberId === '') return;
     setSaving(true);
-
     const [hours, minutes] = time.split(':').map(Number);
     const eventDate = setMinutes(setHours(selectedDate, hours), minutes);
-
     try {
       await onSave({
         member_id: Number(memberId),
@@ -395,71 +688,38 @@ function EventModal({ isOpen, onClose, selectedDate, selectedMemberId, members, 
             <X className="w-5 h-5" />
           </button>
         </div>
-
         <form onSubmit={handleSubmit} className="p-4 space-y-4">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Назва</label>
-            <input
-              type="text"
-              required
-              value={title}
-              onChange={e => setTitle(e.target.value)}
+            <input type="text" required value={title} onChange={e => setTitle(e.target.value)}
               className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Наприклад: Плавання"
-              autoFocus
-            />
+              placeholder="Наприклад: Плавання" autoFocus />
           </div>
-
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Час</label>
-              <input
-                type="time"
-                required
-                value={time}
-                onChange={e => setTime(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
+              <input type="time" required value={time} onChange={e => setTime(e.target.value)}
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" />
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Хто</label>
-              <select
-                required
-                value={memberId}
-                onChange={e => setMemberId(Number(e.target.value))}
-                className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
-              >
-                {members.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
+              <select required value={memberId} onChange={e => setMemberId(Number(e.target.value))}
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white">
+                {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
               </select>
             </div>
           </div>
-
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Місце (необов'язково)</label>
-            <input
-              type="text"
-              value={location}
-              onChange={e => setLocation(e.target.value)}
+            <input type="text" value={location} onChange={e => setLocation(e.target.value)}
               className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Наприклад: Басейн"
-            />
+              placeholder="Наприклад: Басейн" />
           </div>
-
           <div className="pt-4 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-            >
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
               Скасувати
             </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
-            >
+            <button type="submit" disabled={saving} className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50">
               {saving ? 'Зберігаю...' : 'Зберегти'}
             </button>
           </div>
@@ -468,6 +728,8 @@ function EventModal({ isOpen, onClose, selectedDate, selectedMemberId, members, 
     </div>
   );
 }
+
+// ─── Settings Tab ────────────────────────────────────────────
 
 function SettingsTab({ useApi }: { useApi: boolean }) {
   const [token, setToken] = useState('');
@@ -509,8 +771,7 @@ function SettingsTab({ useApi }: { useApi: boolean }) {
       {!useApi && (
         <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
           <p className="text-sm text-amber-800">
-            <strong>Demo режим:</strong> Застосунок працює без серверу. Дані зберігаються в браузері (localStorage).
-            Для повної функціональності (Telegram бот, Gemini AI) потрібен бекенд-сервер.
+            <strong>Demo режим:</strong> Дані зберігаються в браузері. Для повної роботи (Telegram бот, Gemini AI) потрібен бекенд.
           </p>
         </div>
       )}
@@ -518,33 +779,21 @@ function SettingsTab({ useApi }: { useApi: boolean }) {
       <div className="space-y-6">
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-2">Telegram Bot Token</label>
-          <input
-            type="text"
-            value={token}
-            onChange={e => setToken(e.target.value)}
+          <input type="text" value={token} onChange={e => setToken(e.target.value)}
             className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-            placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
-          />
+            placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ" />
           <p className="text-sm text-slate-500 mt-2">Отримайте токен у @BotFather в Telegram.</p>
         </div>
-
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-2">Admin Chat IDs (через кому)</label>
-          <input
-            type="text"
-            value={chatIds}
-            onChange={e => setChatIds(e.target.value)}
+          <input type="text" value={chatIds} onChange={e => setChatIds(e.target.value)}
             className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-            placeholder="123456789, 987654321"
-          />
-          <p className="text-sm text-slate-500 mt-2">Надішліть боту команду /start, щоб дізнатися свій Chat ID.</p>
+            placeholder="123456789, 987654321" />
+          <p className="text-sm text-slate-500 mt-2">Надішліть боту /start, щоб дізнатися свій Chat ID.</p>
         </div>
-
         <div className="pt-6 border-t border-slate-200">
           <h3 className="text-lg font-semibold text-slate-800 mb-4">Інтеграція з Google Календарем (Опціонально)</h3>
-          <p className="text-sm text-slate-600 mb-4">
-            Наразі події зберігаються локально. Для інтеграції з Google Календарем потрібен Service Account.
-          </p>
+          <p className="text-sm text-slate-600 mb-4">Наразі події зберігаються локально.</p>
           <div className="space-y-4 opacity-50 pointer-events-none">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">Google Calendar ID</label>
@@ -552,12 +801,8 @@ function SettingsTab({ useApi }: { useApi: boolean }) {
             </div>
           </div>
         </div>
-
-        <button
-          onClick={saveSettings}
-          disabled={saving}
-          className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50"
-        >
+        <button onClick={saveSettings} disabled={saving}
+          className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50">
           {saving ? 'Зберігаю...' : 'Зберегти налаштування'}
         </button>
       </div>
@@ -565,11 +810,12 @@ function SettingsTab({ useApi }: { useApi: boolean }) {
   );
 }
 
+// ─── Members Tab ─────────────────────────────────────────────
+
 function MembersTab({ members, setMembers, useApi }: { members: Member[]; setMembers: React.Dispatch<React.SetStateAction<Member[]>>; useApi: boolean }) {
   const updateMember = async (id: number, field: string, value: string) => {
     const member = members.find(m => m.id === id);
     if (!member) return;
-
     if (useApi) {
       await fetch(`/api/members/${id}`, {
         method: 'PUT',
@@ -591,33 +837,19 @@ function MembersTab({ members, setMembers, useApi }: { members: Member[]; setMem
                 <img src={member.avatar_url} alt={member.name} className="w-full h-full object-cover" />
               </div>
             </div>
-            <input
-              type="text"
-              value={member.name}
-              onChange={(e) => updateMember(member.id, 'name', e.target.value)}
-              className="text-lg font-bold text-slate-800 text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 outline-none transition-colors w-full mb-1"
-            />
+            <input type="text" value={member.name} onChange={(e) => updateMember(member.id, 'name', e.target.value)}
+              className="text-lg font-bold text-slate-800 text-center bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 outline-none transition-colors w-full mb-1" />
             <span className="text-sm text-slate-500 capitalize mb-4">{member.role === 'parent' ? 'Батько/Мати' : 'Дитина'}</span>
-
             <div className="w-full space-y-3 mt-auto">
               <div>
                 <label className="block text-xs text-left font-medium text-slate-500 mb-1">URL Аватара</label>
-                <input
-                  type="text"
-                  value={member.avatar_url}
-                  onChange={(e) => updateMember(member.id, 'avatar_url', e.target.value)}
-                  className="w-full text-sm px-2 py-1 border border-slate-200 rounded focus:ring-1 focus:ring-indigo-500 outline-none"
-                />
+                <input type="text" value={member.avatar_url} onChange={(e) => updateMember(member.id, 'avatar_url', e.target.value)}
+                  className="w-full text-sm px-2 py-1 border border-slate-200 rounded focus:ring-1 focus:ring-indigo-500 outline-none" />
               </div>
               <div>
                 <label className="block text-xs text-left font-medium text-slate-500 mb-1">Колір (HEX)</label>
                 <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={member.color}
-                    onChange={(e) => updateMember(member.id, 'color', e.target.value)}
-                    className="w-8 h-8 rounded cursor-pointer"
-                  />
+                  <input type="color" value={member.color} onChange={(e) => updateMember(member.id, 'color', e.target.value)} className="w-8 h-8 rounded cursor-pointer" />
                   <span className="text-sm font-mono text-slate-600">{member.color}</span>
                 </div>
               </div>
