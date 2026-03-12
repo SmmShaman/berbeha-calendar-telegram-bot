@@ -94,11 +94,10 @@ function decodeJwtPayload(token: string): GoogleUser | null {
   }
 }
 
+const GOOGLE_CLIENT_ID = '206519724770-in8hq6217oat2ajng11s665f9fcjej88.apps.googleusercontent.com';
+
 function getGoogleClientId(): string {
-  return (
-    (typeof process !== 'undefined' && process.env?.VITE_GOOGLE_CLIENT_ID) ||
-    loadFromStorage<string>('calendar_google_client_id', '')
-  );
+  return GOOGLE_CLIENT_ID || loadFromStorage<string>('calendar_google_client_id', '');
 }
 
 // ─── Google global types ─────────────────────────────────────

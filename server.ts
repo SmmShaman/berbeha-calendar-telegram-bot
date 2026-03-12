@@ -9,7 +9,7 @@ import path from 'path';
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
 app.use(express.json());
 
@@ -269,6 +269,34 @@ app.post('/api/telegram/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
+// Auto-setup: save env vars to DB on first run
+function autoSetup() {
+  if (process.env.TELEGRAM_BOT_TOKEN && !getSetting('telegram_token')) {
+    setSetting('telegram_token', process.env.TELEGRAM_BOT_TOKEN);
+    console.log('Telegram token saved from env');
+  }
+  if (process.env.ADMIN_CHAT_IDS && !getSetting('admin_chat_ids')) {
+    setSetting('admin_chat_ids', process.env.ADMIN_CHAT_IDS);
+    console.log('Admin chat IDs saved from env');
+  }
+}
+
+// Setup Telegram webhook
+async function setupWebhook() {
+  const token = getSetting('telegram_token') || process.env.TELEGRAM_BOT_TOKEN;
+  const appUrl = process.env.APP_URL;
+  if (token && appUrl) {
+    try {
+      const webhookUrl = `${appUrl}/api/telegram/webhook`;
+      const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${webhookUrl}`);
+      const data = await res.json();
+      console.log('Webhook setup:', data.ok ? 'OK' : data.description);
+    } catch (err) {
+      console.error('Failed to set webhook:', err);
+    }
+  }
+}
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -278,10 +306,19 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static('dist'));
+    // SPA fallback: serve index.html for non-API routes
+    app.get('*', (req, res) => {
+      if (!req.path.startsWith('/api/')) {
+        res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
+      }
+    });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  autoSetup();
+
+  app.listen(PORT, '0.0.0.0', async () => {
+    console.log(`Server running on port ${PORT}`);
+    await setupWebhook();
   });
 }
 
