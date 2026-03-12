@@ -3,6 +3,9 @@ FROM node:20-slim AS builder
 
 WORKDIR /app
 
+# Install build tools for better-sqlite3 native module
+RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 RUN npm ci
 
@@ -18,7 +21,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci
 
 # Copy built frontend
 COPY --from=builder /app/dist ./dist
@@ -27,6 +30,8 @@ COPY --from=builder /app/dist ./dist
 COPY server.ts ./
 COPY tsconfig.json ./
 COPY vite.config.ts ./
+COPY index.html ./
+COPY src ./src
 
 # Data directory (will be mounted as persistent volume)
 RUN mkdir -p /data
