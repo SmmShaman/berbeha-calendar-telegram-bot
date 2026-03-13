@@ -691,7 +691,6 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
-  const [detailEvent, setDetailEvent] = useState<CalendarEvent | null>(null);
   const [useApi, setUseApi] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isAdmin, setIsAdmin] = useState(() => isAdminSession());
@@ -831,6 +830,7 @@ function CalendarApp({
   setShowUserMenu: React.Dispatch<React.SetStateAction<boolean>>;
   onLogout: () => void;
 }) {
+  const [detailEvent, setDetailEvent] = useState<CalendarEvent | null>(null);
 
   useEffect(() => {
     tryApi('/api/members').then(result => {
