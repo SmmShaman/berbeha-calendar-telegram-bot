@@ -691,6 +691,7 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
+  const [detailEvent, setDetailEvent] = useState<CalendarEvent | null>(null);
   const [useApi, setUseApi] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isAdmin, setIsAdmin] = useState(() => isAdminSession());
@@ -1112,6 +1113,23 @@ function CalendarApp({
           {!useApi && (
             <span className="text-[10px] md:text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-medium hidden sm:inline">Demo</span>
           )}
+          <button onClick={() => setActiveTab('calendar')} className={cn("px-2 py-1.5 md:px-3 md:py-2 rounded-lg font-medium transition-colors text-xs md:text-sm", activeTab === 'calendar' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-100")}>
+            Календар
+          </button>
+          <button onClick={() => setActiveTab('members')} className={cn("p-1.5 md:p-2 rounded-lg transition-colors", activeTab === 'members' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-100")}>
+            <Users className="w-4 h-4 md:w-5 md:h-5" />
+          </button>
+          <button onClick={() => setActiveTab('events')} className={cn("p-1.5 md:p-2 rounded-lg transition-colors relative", activeTab === 'events' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-100")}>
+            <CalendarDays className="w-4 h-4 md:w-5 md:h-5" />
+            {unmatchedGcalGroups.length > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-amber-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                {unmatchedGcalGroups.length}
+              </span>
+            )}
+          </button>
+          <button onClick={() => setActiveTab('settings')} className={cn("p-1.5 md:p-2 rounded-lg transition-colors", activeTab === 'settings' ? "bg-indigo-100 text-indigo-700" : "text-slate-600 hover:bg-slate-100")}>
+            <Settings className="w-4 h-4 md:w-5 md:h-5" />
+          </button>
 
           {/* Connect Google button */}
           <button
@@ -1197,7 +1215,7 @@ function CalendarApp({
       </header>
 
       {/* ── Main content ── */}
-      <main className="flex-1 p-2 md:p-4 pb-16 w-full flex flex-col min-h-0">
+      <main className="flex-1 p-2 md:p-4 w-full flex flex-col min-h-0">
         {activeTab === 'calendar' && (() => {
           const today = new Date();
           const days = eachDayOfInterval({ start: windowStart, end: windowEnd });
@@ -1324,12 +1342,13 @@ function CalendarApp({
                         if (isNearToday) return (
                           <div
                             key={event.id}
-                            className={cn("group px-0.5 py-px rounded-[2px] font-medium leading-tight max-w-full flex flex-col", todayFont)}
+                            className={cn("group px-0.5 py-px rounded-[2px] font-medium leading-tight max-w-full flex flex-col cursor-pointer", todayFont)}
                             style={{
                               backgroundColor: bgColor,
                               borderLeft: `2px solid ${borderColor}`
                             }}
                             title={tooltipParts}
+                            onClick={(e) => { e.stopPropagation(); setDetailEvent(event); }}
                           >
                             <div className="flex items-center truncate">
                               <span className="mr-0.5 shrink-0 font-bold text-blue-600">{time}</span>
@@ -1351,12 +1370,13 @@ function CalendarApp({
                         return (
                           <div
                             key={event.id}
-                            className="group px-0.5 py-px rounded-[2px] text-[7px] md:text-[9px] font-medium leading-tight max-w-full truncate"
+                            className="group px-0.5 py-px rounded-[2px] text-[7px] md:text-[9px] font-medium leading-tight max-w-full truncate cursor-pointer"
                             style={{
                               backgroundColor: bgColorFar,
                               borderLeft: `2px solid ${borderColor}`
                             }}
                             title={tooltipParts}
+                            onClick={(e) => { e.stopPropagation(); setDetailEvent(event); }}
                           >
                             <span className="font-semibold" style={{ color: titleColor }}>{event.title}</span>
                             {' '}<span className="font-bold text-blue-600">{time}</span>
@@ -1371,9 +1391,9 @@ function CalendarApp({
                     <div
                       key={day.toString()}
                       className={cn(
-                        "flex flex-col border-b border-slate-200 transition-colors overflow-hidden",
-                        isToday && "bg-indigo-100/60 ring-2 ring-inset ring-indigo-400",
-                        isWknd && !isToday && "bg-pink-50/50"
+                        "flex flex-col border-b border-slate-200 overflow-hidden",
+                        isToday ? "bg-indigo-100 ring-2 ring-inset ring-indigo-400" :
+                        isWknd ? "bg-pink-50" : "bg-white"
                       )}
                       style={{ flex: `${dayPct} 0 0%` }}
                     >
@@ -1408,8 +1428,8 @@ function CalendarApp({
                         {members.map(m => (
                           <div
                             key={m.id}
-                            className="flex-1 px-px border-r border-slate-300 min-w-0 overflow-hidden cursor-pointer hover:brightness-95 transition-all flex items-start"
-                            style={{ backgroundColor: `${m.color}10` }}
+                            className="flex-1 px-px border-r border-slate-200 min-w-0 overflow-hidden cursor-pointer hover:brightness-95 transition-all flex items-start"
+                            style={{ backgroundColor: `${m.color}12` }}
                             onClick={() => handleCellClick(day, m.id)}
                           >
                             {renderEvents(memberEvents(m.id), m)}
@@ -1456,59 +1476,6 @@ function CalendarApp({
         )}
       </main>
 
-      {/* ── Bottom Tab Bar ── */}
-      <nav className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 max-w-screen-2xl mx-auto">
-        <div className="flex items-center justify-around h-14">
-          <button
-            onClick={() => setActiveTab('calendar')}
-            className={cn(
-              "flex flex-col items-center justify-center flex-1 h-full gap-0.5 transition-colors",
-              activeTab === 'calendar' ? "text-indigo-600" : "text-slate-400 hover:text-slate-600"
-            )}
-          >
-            <Calendar className="w-5 h-5" />
-            <span className="text-[10px] font-medium">Календар</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('members')}
-            className={cn(
-              "flex flex-col items-center justify-center flex-1 h-full gap-0.5 transition-colors",
-              activeTab === 'members' ? "text-indigo-600" : "text-slate-400 hover:text-slate-600"
-            )}
-          >
-            <Users className="w-5 h-5" />
-            <span className="text-[10px] font-medium">Учасники</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('events')}
-            className={cn(
-              "flex flex-col items-center justify-center flex-1 h-full gap-0.5 transition-colors relative",
-              activeTab === 'events' ? "text-indigo-600" : "text-slate-400 hover:text-slate-600"
-            )}
-          >
-            <div className="relative">
-              <CalendarDays className="w-5 h-5" />
-              {unmatchedGcalGroups.length > 0 && (
-                <span className="absolute -top-1 -right-1.5 w-4 h-4 bg-amber-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
-                  {unmatchedGcalGroups.length}
-                </span>
-              )}
-            </div>
-            <span className="text-[10px] font-medium">Події</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={cn(
-              "flex flex-col items-center justify-center flex-1 h-full gap-0.5 transition-colors",
-              activeTab === 'settings' ? "text-indigo-600" : "text-slate-400 hover:text-slate-600"
-            )}
-          >
-            <Settings className="w-5 h-5" />
-            <span className="text-[10px] font-medium">Налаштування</span>
-          </button>
-        </div>
-      </nav>
-
       {isModalOpen && (
         <EventModal
           onClose={() => setIsModalOpen(false)}
@@ -1518,6 +1485,78 @@ function CalendarApp({
           onSave={addEvent}
         />
       )}
+
+      {/* ── Event Detail Modal ── */}
+      {detailEvent && (() => {
+        const ev = detailEvent;
+        const member = members.find(m => m.id === ev.member_id);
+        const isSpond = !!ev._spond;
+        const isGcal = ev.id < 0 && !ev._spond;
+        const isTgBot = ev.id >= 0;
+        const source = isSpond ? 'Spond' : isGcal ? 'Google Calendar' : 'Telegram';
+        const sourceColor = isSpond ? 'text-teal-600' : isGcal ? 'text-green-600' : 'text-red-600';
+        const startDate = new Date(ev.start_time);
+        const endDate = ev.end_time ? new Date(ev.end_time) : null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDetailEvent(null)}>
+            <div className="bg-white rounded-2xl shadow-xl w-[90%] max-w-md mx-4 overflow-hidden" onClick={e => e.stopPropagation()}>
+              {/* Header with member color */}
+              <div className="p-4 text-white" style={{ backgroundColor: member?.color || '#6366f1' }}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-bold">{ev.title}</h3>
+                    <p className="text-sm opacity-90">{member?.name || 'Сім\'я'}</p>
+                  </div>
+                  <button onClick={() => setDetailEvent(null)} className="p-1 rounded-full hover:bg-white/20">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+              {/* Details */}
+              <div className="p-4 space-y-3">
+                <div className="flex items-center gap-3">
+                  <span className="text-slate-400 w-5 text-center">🕐</span>
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">
+                      {format(startDate, 'EEEE, d MMMM yyyy', { locale: uk })}
+                    </p>
+                    <p className="text-sm text-slate-600">
+                      {format(startDate, 'HH:mm')}
+                      {endDate && ` — ${format(endDate, 'HH:mm')}`}
+                    </p>
+                  </div>
+                </div>
+                {ev.location && (
+                  <div className="flex items-center gap-3">
+                    <span className="text-slate-400 w-5 text-center">📍</span>
+                    <p className="text-sm text-slate-800">{ev.location}</p>
+                  </div>
+                )}
+                {ev.spond_group_name && (
+                  <div className="flex items-center gap-3">
+                    <span className="text-slate-400 w-5 text-center">👥</span>
+                    <p className="text-sm text-slate-800">{ev.spond_group_name}</p>
+                  </div>
+                )}
+                <div className="flex items-center gap-3">
+                  <span className="text-slate-400 w-5 text-center">📌</span>
+                  <p className={cn("text-sm font-medium", sourceColor)}>{source}</p>
+                </div>
+                {isTgBot && (
+                  <div className="pt-2 border-t border-slate-100">
+                    <button
+                      onClick={() => { deleteEvent(ev.id); setDetailEvent(null); }}
+                      className="flex items-center gap-2 text-sm text-red-500 hover:text-red-700 font-medium"
+                    >
+                      <Trash2 className="w-4 h-4" /> Видалити подію
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
