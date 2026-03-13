@@ -845,7 +845,7 @@ async function translateTitles(titles: string[]): Promise<Record<string, string>
     const prompt = `Translate these Norwegian sports/event titles to Ukrainian. Keep proper names (places, people) as-is. Return a JSON object where keys are originals and values are translations.\n\n${untranslated.map((t, i) => `${i + 1}. "${t}"`).join('\n')}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: { parts: [{ text: prompt }] },
       config: { responseMimeType: 'application/json' },
     });
@@ -1429,10 +1429,11 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
     }
 
     const geminiConfig = {
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: { parts },
       config: {
         systemInstruction: systemPrompt,
+        thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json' as const,
         responseSchema: {
           type: Type.OBJECT,
