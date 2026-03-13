@@ -81,16 +81,9 @@ type SpondGroupMapping = {
 
 // ─── Photo Slideshow Component ───────────────────────────────
 
-// Transition types for slideshow variety
+// Simple crossfade transition — no overlapping artifacts
 const TRANSITIONS = [
   { name: 'fade', enter: 'opacity-100', exit: 'opacity-0', style: {} },
-  { name: 'zoom-in', enter: 'opacity-100 scale-100', exit: 'opacity-0 scale-110', style: {} },
-  { name: 'zoom-out', enter: 'opacity-100 scale-100', exit: 'opacity-0 scale-90', style: {} },
-  { name: 'slide-left', enter: 'opacity-100 translate-x-0', exit: 'opacity-0 -translate-x-full', style: {} },
-  { name: 'slide-right', enter: 'opacity-100 translate-x-0', exit: 'opacity-0 translate-x-full', style: {} },
-  { name: 'slide-up', enter: 'opacity-100 translate-y-0', exit: 'opacity-0 -translate-y-full', style: {} },
-  { name: 'blur', enter: 'opacity-100 blur-0', exit: 'opacity-0 blur-md', style: {} },
-  { name: 'rotate', enter: 'opacity-100 rotate-0 scale-100', exit: 'opacity-0 rotate-12 scale-75', style: {} },
 ] as const;
 
 // Each slideshow instance gets its own random interval and transition
@@ -145,22 +138,20 @@ function PhotoSlideshow({ photos, fallbackUrl, color, name, mode = 'circle' }: {
   if (mode === 'cell') {
     return (
       <div className="relative w-full overflow-hidden" style={{ backgroundColor: `${color}20`, aspectRatio: '3/4' }}>
-        {/* Previous image (visible during transition) */}
-        {photos.length > 1 && (
-          <img
-            src={prevSrc}
-            alt=""
-            className="absolute inset-0 w-full h-full object-contain"
-            referrerPolicy="no-referrer"
-          />
-        )}
-        {/* Current image with transition */}
+        {/* Previous image (stays visible as background during crossfade) */}
+        <img
+          src={prevSrc}
+          alt=""
+          className="absolute inset-0 w-full h-full object-contain"
+          referrerPolicy="no-referrer"
+        />
+        {/* Current image fades in on top */}
         <img
           src={currentSrc}
           alt={name || ''}
           className={cn(
-            "absolute inset-0 w-full h-full object-contain transition-all duration-700 ease-in-out",
-            transitioning ? transition.exit : transition.enter
+            "absolute inset-0 w-full h-full object-contain transition-opacity duration-700 ease-in-out",
+            transitioning ? 'opacity-0' : 'opacity-100'
           )}
           referrerPolicy="no-referrer"
         />
@@ -184,13 +175,11 @@ function PhotoSlideshow({ photos, fallbackUrl, color, name, mode = 'circle' }: {
   if (mode === 'avatar') {
     return (
       <div className="relative w-24 h-24 rounded-full overflow-hidden bg-white" style={{ borderColor: color, borderWidth: 2 }}>
-        {photos.length > 1 && (
-          <img src={prevSrc} alt="" className="absolute inset-0 w-full h-full rounded-full object-cover" referrerPolicy="no-referrer" />
-        )}
+        <img src={prevSrc} alt="" className="absolute inset-0 w-full h-full rounded-full object-cover" referrerPolicy="no-referrer" />
         <img
           src={currentSrc}
           alt=""
-          className={cn("absolute inset-0 w-full h-full rounded-full object-cover transition-all duration-700 ease-in-out", transitioning ? transition.exit : transition.enter)}
+          className={cn("absolute inset-0 w-full h-full rounded-full object-cover transition-opacity duration-700 ease-in-out", transitioning ? 'opacity-0' : 'opacity-100')}
           referrerPolicy="no-referrer"
         />
       </div>
