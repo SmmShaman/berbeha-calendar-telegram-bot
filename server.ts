@@ -1396,101 +1396,57 @@ async function processMessage(update: any) {
       ? eventTypesLib.map(e => `"${e.short_name}" → ${[e.full_name, e.default_location ? `місце: ${e.default_location}` : ''].filter(Boolean).join(', ')}, ${e.default_duration_min} хв`).join('\n')
       : '';
 
-    const prompt = `
-      Ти помічник для сімейного календаря. Розпізнай ДІЮ користувача з повідомлення.
-      Поточна дата і час: ${new Date().toISOString()}.
-      Часовий пояс: Europe/Oslo (CET/CEST).
-      Члени сім'ї (ID: Ім'я): ${membersList}.
-${placesContext ? `
-      📚 БІБЛІОТЕКА МІСЦЬ (використовуй ці місця якщо згадуються):
-      ${placesContext}
-` : ''}${eventTypesContext ? `
-      📚 БІБЛІОТЕКА ПОДІЙ (типи подій з місцями за замовчуванням):
-      ${eventTypesContext}
-` : ''}
-      Існуючі події в календарі:
-      ${eventsContext || '(немає подій)'}
+    const systemPrompt = `Ти парсер для сімейного календаря. Твоя єдина задача — з повідомлення витягти: хто, що, коли, де.
 
-      ВИЗНАЧ ДІЮ (action):
-      - "add" — додати нову подію (або кілька)
-      - "delete" — видалити існуючу подію (або кілька). Знайди відповідні події за описом/датою/ім'ям.
-      - "reschedule" — перенести подію на інший час
-      - "query" — запит на розклад (наприклад "який розклад у Єгора на наступний тиждень?"). Вкажи memberId та period ("today", "tomorrow", "this_week", "next_week", "this_month").
+ПОВЕРНИ ТІЛЬКИ JSON з полями transcription та actions. НЕ копіюй ці інструкції у відповідь!
 
-      КРИТИЧНО ВАЖЛИВО — ПАРСИНГ ДАТИ І ЧАСУ:
-      - ЗАВЖДИ парси дату з повідомлення. "14 березня о 10 годині" = 2026-03-14T10:00:00+01:00
-      - "о 10 годині" / "о 10:00" / "о десятій" = 10:00
-      - "о 19:00" / "о сьомій" / "о 7 вечора" = 19:00
-      - "в середу" = найближча середа від поточної дати
-      - "березня" / "в березні" = місяць 03
-      - НІКОЛИ не залишай startTime порожнім якщо в тексті є хоча б натяк на дату чи час!
+title — ТІЛЬКИ коротка назва події (1-2 слова): "плавання", "футбол", "концерт", "танці".
 
-      КРИТИЧНО ВАЖЛИВО — МІСЦЕ (location):
-      - Все що йде після "в" / "на" / "у" і не є датою/часом — це МІСЦЕ. Наприклад: "в Лені Хофсванген скуле" → location: "Лені Хофсванген скуле"
-      - Норвезькі назви (школи, стадіони, зали) — це location. Наприклад: "Lena Hovsfjorden skole", "Gjøvik svømmehall"
-      - Перевір бібліотеку місць — якщо є схожа назва, використай її.
-      - Якщо тип події є в бібліотеці подій і має місце за замовчуванням — використай його (якщо інше місце не вказано).
+Зараз: ${new Date().toISOString()}. Часовий пояс: Europe/Oslo.
 
-      КРИТИЧНО ВАЖЛИВО — ДЕКІЛЬКА ПОДІЙ:
-      - Одне повідомлення може містити ДЕКІЛЬКА подій! Слова "потім", "а потім", "після цього", "також", "і ще", кома між подіями — означають ОКРЕМІ події.
-      - Приклад: "концерт о 19:00, потім тренування о 20:30" = ДВІ окремі action "add".
-      - Приклад: "Єгор футбол завтра о 16:00 на стадіоні, Тимур танці о 18:00 в школі" = ДВІ окремі action "add".
-      - Якщо "два дні підряд" — створи ОКРЕМУ подію на кожен день.
+Сім'я: ${membersList}.
 
-      ПРАВИЛА:
-      - Створи ОКРЕМУ action для кожної події для кожного учасника.
-      - Якщо "видалити" або "скасувати" або "прибери" — це action "delete". Знайди eventId з існуючих подій.
-      - Якщо "перенеси" або "зміни дату" — це action "reschedule".
-      - Поверни масив actions (навіть якщо одна дія).
+Дії: add (додати), delete (видалити, eventId), reschedule (перенести, eventId+newStartTime), query (розклад, memberId+period).
+${placesContext ? `\nМісця: ${placesContext}` : ''}${eventTypesContext ? `\nТипи подій: ${eventTypesContext}` : ''}${eventsContext ? `\nІснуючі події:\n${eventsContext}` : ''}
 
-      Для action "add":
-        - memberId (ID члена сім'ї — ОБОВ'ЯЗКОВО вкажи правильний ID)
-        - title (назва події: футбол, тренування, танці, плавання, концерт тощо)
-        - startTime (ISO 8601 — ОБОВ'ЯЗКОВО! Завжди парси з тексту!)
-        - endTime (ISO 8601 — якщо не вказано, +1 година від startTime)
-        - location (місце проведення — ОБОВ'ЯЗКОВО якщо згадується в тексті!)
-
-      Для action "delete":
-        - eventId (ID існуючої події зі списку вище)
-
-      Для action "reschedule":
-        - eventId (ID існуючої події)
-        - newStartTime (ISO 8601), newEndTime (ISO 8601)
-    `;
+Парсинг дати: "14 березня о 10" = 2026-03-14T10:00:00+01:00. "в середу" = найближча середа. ЗАВЖДИ заповнюй startTime!
+Парсинг місця: "в Лену" / "в школі" / "Lena Ungdomsskole" — це location. Норвезькі назви = місце.
+Декілька подій: "концерт о 19, потім тренування о 20:30" = ДВІ actions.`;
 
     const parts: any[] = [];
     if (audioBase64) {
       const mimeType = mediaType === 'video_note' ? 'video/mp4' : 'audio/ogg';
       parts.push({ inlineData: { data: audioBase64, mimeType } });
-      parts.push({ text: prompt });
+      parts.push({ text: 'Розпізнай що сказано і витягни події з цього аудіо.' });
     } else {
-      parts.push({ text: prompt + '\nПовідомлення: ' + textToProcess });
+      parts.push({ text: 'Повідомлення від користувача: ' + textToProcess });
     }
 
     const geminiConfig = {
       model: 'gemini-2.5-flash',
       contents: { parts },
       config: {
+        systemInstruction: systemPrompt,
         responseMimeType: 'application/json' as const,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            transcription: { type: Type.STRING, description: 'What was said in the audio/text — exact transcription in original language' },
+            transcription: { type: Type.STRING, description: 'Exact transcription of what was said' },
             actions: {
               type: Type.ARRAY,
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  action: { type: Type.STRING },
-                  memberId: { type: Type.INTEGER },
-                  title: { type: Type.STRING },
-                  startTime: { type: Type.STRING },
-                  endTime: { type: Type.STRING },
-                  location: { type: Type.STRING },
+                  action: { type: Type.STRING, description: 'add, delete, reschedule, or query' },
+                  memberId: { type: Type.INTEGER, description: 'Family member ID' },
+                  title: { type: Type.STRING, description: 'Short event name: плавання, футбол, концерт (1-2 words only!)' },
+                  startTime: { type: Type.STRING, description: 'ISO 8601 datetime with timezone' },
+                  endTime: { type: Type.STRING, description: 'ISO 8601 datetime, default +1h from startTime' },
+                  location: { type: Type.STRING, description: 'Place name from the message' },
                   eventId: { type: Type.INTEGER },
                   newStartTime: { type: Type.STRING },
                   newEndTime: { type: Type.STRING },
-                  period: { type: Type.STRING, description: 'For query action: today, tomorrow, this_week, next_week, this_month' },
+                  period: { type: Type.STRING, description: 'today, tomorrow, this_week, next_week, this_month' },
                 },
                 required: ['action'] as string[],
               },
