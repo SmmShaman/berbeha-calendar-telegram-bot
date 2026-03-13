@@ -652,6 +652,57 @@ function requestGoogleToken(onToken: (token: string) => void) {
   tokenClient.requestAccessToken({ prompt: 'consent' });
 }
 
+// ─── Admin PIN protection ────────────────────────────────────
+const ADMIN_PIN = '1234';
+
+function PinModal({ onSuccess, onCancel }: { onSuccess: () => void; onCancel: () => void }) {
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const handleSubmit = () => {
+    if (pin === ADMIN_PIN) {
+      saveToStorage('calendar_admin_until', Date.now() + 30 * 60 * 1000); // 30 min session
+      onSuccess();
+    } else {
+      setError(true);
+      setPin('');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-2xl shadow-xl p-6 w-80">
+        <h3 className="text-lg font-bold text-slate-800 mb-2 text-center">Введіть PIN</h3>
+        <p className="text-sm text-slate-500 mb-4 text-center">Для редагування потрібен пароль</p>
+        <input
+          ref={inputRef}
+          type="password"
+          inputMode="numeric"
+          maxLength={8}
+          value={pin}
+          onChange={e => { setPin(e.target.value); setError(false); }}
+          onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+          className={`w-full text-center text-2xl tracking-[0.5em] border-2 rounded-xl px-4 py-3 mb-3 outline-none ${error ? 'border-red-400 bg-red-50' : 'border-slate-200 focus:border-indigo-400'}`}
+          placeholder="****"
+        />
+        {error && <p className="text-red-500 text-sm text-center mb-3">Невірний PIN</p>}
+        <div className="flex gap-2">
+          <button onClick={onCancel} className="flex-1 py-2 rounded-xl text-slate-600 hover:bg-slate-100 text-sm font-medium">Скасувати</button>
+          <button onClick={handleSubmit} className="flex-1 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-medium">Увійти</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function isAdminSession(): boolean {
+  const until = loadFromStorage<number>('calendar_admin_until', 0);
+  return Date.now() < until;
+}
+
 export default function App() {
   const [user, setUser] = useState<GoogleUser | null>(() => loadFromStorage<GoogleUser | null>('calendar_user', null));
   const [googleToken, setGoogleToken] = useState(() => loadFromStorage<string>('calendar_google_token', ''));
@@ -665,66 +716,105 @@ export default function App() {
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
   const [useApi, setUseApi] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(() => isAdminSession());
+  const [showPinModal, setShowPinModal] = useState(false);
+  const [pendingTab, setPendingTab] = useState<'settings' | 'members' | 'events' | null>(null);
 
   // ── Default guest user if not logged in (calendar works without Google) ──
-  const effectiveUser: GoogleUser = user || { name: 'Берберга', email: '', picture: '' };
+  const effectiveUser: GoogleUser = user || { name: 'Бербеха', email: '', picture: '' };
+
+  // ── Tab switch with PIN protection for admin tabs ──
+  const handleTabChange = (tab: 'calendar' | 'settings' | 'members' | 'events') => {
+    if (tab === 'calendar') {
+      setActiveTab(tab);
+      return;
+    }
+    // Admin tabs require PIN
+    if (isAdmin || isAdminSession()) {
+      setIsAdmin(true);
+      setActiveTab(tab);
+    } else {
+      setPendingTab(tab);
+      setShowPinModal(true);
+    }
+  };
 
   // ── Render calendar directly (no login required) ──
   return (
-    <CalendarApp
-      user={effectiveUser}
-      googleToken={googleToken}
-      setGoogleToken={setGoogleToken}
-      members={members}
-      setMembers={setMembers}
-      events={events}
-      setEvents={setEvents}
-      holidays={holidays}
-      setHolidays={setHolidays}
-      activeTab={activeTab}
-      setActiveTab={setActiveTab}
-      monthOffset={monthOffset}
-      setMonthOffset={setMonthOffset}
-      isModalOpen={isModalOpen}
-      setIsModalOpen={setIsModalOpen}
-      selectedDate={selectedDate}
-      setSelectedDate={setSelectedDate}
-      selectedMemberId={selectedMemberId}
-      setSelectedMemberId={setSelectedMemberId}
-      useApi={useApi}
-      setUseApi={setUseApi}
-      showUserMenu={showUserMenu}
-      setShowUserMenu={setShowUserMenu}
-      onLogout={() => {
-        localStorage.removeItem('calendar_user');
-        localStorage.removeItem('calendar_google_token');
-        if (window.google?.accounts?.id) {
-          window.google.accounts.id.disableAutoSelect();
-        }
-        setUser(null);
-        setGoogleToken('');
-        setShowUserMenu(false);
-      }}
-      onGoogleLogin={() => {
-        // Show login page as a modal or trigger Google Sign-In directly
-        const clientId = getGoogleClientId();
-        if (clientId && window.google?.accounts?.id) {
-          window.google.accounts.id.initialize({
-            client_id: clientId,
-            callback: (response: { credential?: string }) => {
-              if (response.credential) {
-                const decoded = decodeJwtPayload(response.credential);
-                if (decoded) {
-                  saveToStorage('calendar_user', decoded);
-                  setUser(decoded);
+    <>
+      {showPinModal && (
+        <PinModal
+          onSuccess={() => {
+            setIsAdmin(true);
+            setShowPinModal(false);
+            if (pendingTab) {
+              setActiveTab(pendingTab);
+              setPendingTab(null);
+            }
+          }}
+          onCancel={() => { setShowPinModal(false); setPendingTab(null); }}
+        />
+      )}
+      <CalendarApp
+        user={effectiveUser}
+        googleToken={googleToken}
+        setGoogleToken={setGoogleToken}
+        members={members}
+        setMembers={setMembers}
+        events={events}
+        setEvents={setEvents}
+        holidays={holidays}
+        setHolidays={setHolidays}
+        activeTab={activeTab}
+        setActiveTab={handleTabChange}
+        monthOffset={monthOffset}
+        setMonthOffset={setMonthOffset}
+        isModalOpen={isAdmin ? isModalOpen : false}
+        setIsModalOpen={(v) => {
+          if (typeof v === 'function') { if (isAdmin) setIsModalOpen(v); return; }
+          if (v && !isAdmin) { setShowPinModal(true); return; }
+          setIsModalOpen(v);
+        }}
+        selectedDate={selectedDate}
+        setSelectedDate={setSelectedDate}
+        selectedMemberId={selectedMemberId}
+        setSelectedMemberId={setSelectedMemberId}
+        useApi={useApi}
+        setUseApi={setUseApi}
+        showUserMenu={showUserMenu}
+        setShowUserMenu={setShowUserMenu}
+        onLogout={() => {
+          localStorage.removeItem('calendar_user');
+          localStorage.removeItem('calendar_google_token');
+          localStorage.removeItem('calendar_admin_until');
+          if (window.google?.accounts?.id) {
+            window.google.accounts.id.disableAutoSelect();
+          }
+          setUser(null);
+          setGoogleToken('');
+          setIsAdmin(false);
+          setShowUserMenu(false);
+        }}
+        onGoogleLogin={() => {
+          const clientId = getGoogleClientId();
+          if (clientId && window.google?.accounts?.id) {
+            window.google.accounts.id.initialize({
+              client_id: clientId,
+              callback: (response: { credential?: string }) => {
+                if (response.credential) {
+                  const decoded = decodeJwtPayload(response.credential);
+                  if (decoded) {
+                    saveToStorage('calendar_user', decoded);
+                    setUser(decoded);
+                  }
                 }
-              }
-            },
-          });
-          window.google.accounts.id.prompt();
-        }
-      }}
-    />
+              },
+            });
+            window.google.accounts.id.prompt();
+          }
+        }}
+      />
+    </>
   );
 }
 
