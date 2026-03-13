@@ -155,7 +155,6 @@ function addEventType(shortName: string, fullName?: string, defaultLocation?: st
 const pendingFollowUp = new Map<string,
   | { type: 'place'; name: string; eventId?: number }
   | { type: 'event_type'; name: string; eventId?: number }
-  | { type: 'incomplete_events'; actions: any[]; transcription: string; missingFields: string[]; members: any[] }
 >();
 
 // Helper functions for settings
@@ -1318,134 +1317,6 @@ async function processMessage(update: any) {
     const answer = update.message.text.trim();
     pendingFollowUp.delete(chatId);
 
-    if (followUp.type === 'incomplete_events') {
-      const { actions: pendingActions, missingFields, transcription: origTranscription, members: pendingMembers } = followUp;
-      const answerLower = answer.toLowerCase();
-
-      // Parse month from answer
-      const monthMap: Record<string, number> = {
-        'січень': 0, 'січня': 0, 'січ': 0,
-        'лютий': 1, 'лютого': 1, 'лют': 1,
-        'березень': 2, 'березня': 2, 'берез': 2,
-        'квітень': 3, 'квітня': 3, 'квіт': 3,
-        'травень': 4, 'травня': 4, 'трав': 4,
-        'червень': 5, 'червня': 5, 'черв': 5,
-        'липень': 6, 'липня': 6, 'лип': 6,
-        'серпень': 7, 'серпня': 7, 'серп': 7,
-        'вересень': 8, 'вересня': 8, 'верес': 8,
-        'жовтень': 9, 'жовтня': 9, 'жовт': 9,
-        'листопад': 10, 'листопада': 10, 'лист': 10,
-        'грудень': 11, 'грудня': 11, 'груд': 11,
-      };
-      const confirmWords = ['так', 'да', 'ок', 'yes', 'ага', 'угу', '+'];
-      const isConfirm = confirmWords.some(w => answerLower === w || answerLower.startsWith(w + ' ') || answerLower.startsWith(w + ','));
-
-      let resolvedMonth: number | null = null;
-      let locationPart = answer;
-
-      if (missingFields.includes('month')) {
-        if (isConfirm) {
-          resolvedMonth = -1; // keep Gemini's month
-          // Remove confirm word from start for location extraction
-          locationPart = answer.replace(/^(так|да|ок|yes|ага|угу|\+)[,.\s]*/i, '').trim();
-        } else {
-          for (const [key, val] of Object.entries(monthMap)) {
-            if (answerLower.includes(key)) {
-              resolvedMonth = val;
-              // Remove month word from answer for location extraction
-              locationPart = answer.replace(new RegExp(key, 'i'), '').replace(/^[,.\s]+/, '').trim();
-              break;
-            }
-          }
-        }
-      }
-
-      // Extract location
-      let resolvedLocation = '';
-      if (missingFields.includes('location')) {
-        // If both month and location were missing, location is the remaining text after month
-        if (missingFields.includes('month')) {
-          resolvedLocation = locationPart;
-        } else {
-          resolvedLocation = answer;
-        }
-      }
-
-      // Update actions with resolved info
-      const lines: string[] = [];
-      const unknownPlaces: { name: string; eventId: number }[] = [];
-
-      for (const act of pendingActions) {
-        if (act.action !== 'add') continue;
-
-        // Update month
-        if (resolvedMonth !== null && resolvedMonth >= 0 && act.startTime) {
-          const d = new Date(act.startTime);
-          d.setMonth(resolvedMonth);
-          act.startTime = d.toISOString();
-          if (act.endTime) {
-            const de = new Date(act.endTime);
-            de.setMonth(resolvedMonth);
-            act.endTime = de.toISOString();
-          }
-        }
-
-        // Update location
-        let location = act.location || '';
-        if (!location && resolvedLocation) {
-          location = resolvedLocation;
-          act.location = resolvedLocation;
-        }
-        // Check library
-        if (location) {
-          const knownPlace = findPlace(location);
-          if (knownPlace && knownPlace.description) {
-            location = `${knownPlace.short_name} (${[knownPlace.description, knownPlace.address].filter(Boolean).join(', ')})`;
-          }
-        }
-        if (!location) {
-          const knownType = findEventType(act.title);
-          if (knownType && knownType.default_location) {
-            location = knownType.default_location;
-          }
-        }
-
-        // Now save event
-        const result = db.prepare('INSERT INTO events (member_id, title, start_time, end_time, location) VALUES (?, ?, ?, ?, ?)')
-          .run(act.memberId || null, act.title, act.startTime, act.endTime || act.startTime, location);
-        const newEventId = result.lastInsertRowid as number;
-
-        if (act.location && !findPlace(act.location)) {
-          unknownPlaces.push({ name: act.location, eventId: newEventId });
-        }
-        if (!findEventType(act.title)) {
-          addEventType(act.title, '', location, 60);
-        }
-
-        const member = pendingMembers.find((m: any) => m.id === act.memberId);
-        const memberName = member ? (member as any).name : 'Сім\'я';
-        const dateStr = new Date(act.startTime).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
-        lines.push(`✅ <b>Додано:</b> ${act.title}\n👤 ${memberName}\n🕐 ${dateStr}${location ? `\n📍 ${location}` : ''}`);
-      }
-
-      if (lines.length > 0) {
-        await sendMessage(lines.join('\n\n'));
-      }
-
-      // Ask about unknown places
-      if (unknownPlaces.length > 0) {
-        const unknown = unknownPlaces[0];
-        pendingFollowUp.set(chatId, { type: 'place', name: unknown.name, eventId: unknown.eventId });
-        await sendMessage(
-          `❓ <b>Що таке "${unknown.name}"?</b>\n\n` +
-          `Напиши коротко — наприклад:\n` +
-          `<i>"басейн, Rådhusgata 28, Lena"</i>\n\n` +
-          `Я збережу це в бібліотеку місць 📚`
-        );
-      }
-      return;
-    }
-
     if (followUp.type === 'place') {
       // Parse answer: try to extract description and address
       addPlace(followUp.name, '', '', answer);
@@ -1546,22 +1417,38 @@ ${placesContext ? `
       - "reschedule" — перенести подію на інший час
       - "query" — запит на розклад (наприклад "який розклад у Єгора на наступний тиждень?"). Вкажи memberId та period ("today", "tomorrow", "this_week", "next_week", "this_month").
 
-      ПРАВИЛА:
-      - Одне повідомлення може містити ДЕКІЛЬКА подій для РІЗНИХ членів сім'ї. Створи ОКРЕМУ action для кожної події для кожного учасника.
+      КРИТИЧНО ВАЖЛИВО — ПАРСИНГ ДАТИ І ЧАСУ:
+      - ЗАВЖДИ парси дату з повідомлення. "14 березня о 10 годині" = 2026-03-14T10:00:00+01:00
+      - "о 10 годині" / "о 10:00" / "о десятій" = 10:00
+      - "о 19:00" / "о сьомій" / "о 7 вечора" = 19:00
+      - "в середу" = найближча середа від поточної дати
+      - "березня" / "в березні" = місяць 03
+      - НІКОЛИ не залишай startTime порожнім якщо в тексті є хоча б натяк на дату чи час!
+
+      КРИТИЧНО ВАЖЛИВО — МІСЦЕ (location):
+      - Все що йде після "в" / "на" / "у" і не є датою/часом — це МІСЦЕ. Наприклад: "в Лені Хофсванген скуле" → location: "Лені Хофсванген скуле"
+      - Норвезькі назви (школи, стадіони, зали) — це location. Наприклад: "Lena Hovsfjorden skole", "Gjøvik svømmehall"
+      - Перевір бібліотеку місць — якщо є схожа назва, використай її.
+      - Якщо тип події є в бібліотеці подій і має місце за замовчуванням — використай його (якщо інше місце не вказано).
+
+      КРИТИЧНО ВАЖЛИВО — ДЕКІЛЬКА ПОДІЙ:
+      - Одне повідомлення може містити ДЕКІЛЬКА подій! Слова "потім", "а потім", "після цього", "також", "і ще", кома між подіями — означають ОКРЕМІ події.
+      - Приклад: "концерт о 19:00, потім тренування о 20:30" = ДВІ окремі action "add".
+      - Приклад: "Єгор футбол завтра о 16:00 на стадіоні, Тимур танці о 18:00 в школі" = ДВІ окремі action "add".
       - Якщо "два дні підряд" — створи ОКРЕМУ подію на кожен день.
-      - Якщо згадується місце/адреса/стадіон/школа/зала — ОБОВ'ЯЗКОВО заповни поле location. Перевір бібліотеку місць — якщо є збіг, використай повну назву/адресу з бібліотеки.
-      - Якщо тип події є в бібліотеці подій і має місце за замовчуванням — використай його як location (якщо інше не вказано).
+
+      ПРАВИЛА:
+      - Створи ОКРЕМУ action для кожної події для кожного учасника.
       - Якщо "видалити" або "скасувати" або "прибери" — це action "delete". Знайди eventId з існуючих подій.
       - Якщо "перенеси" або "зміни дату" — це action "reschedule".
       - Поверни масив actions (навіть якщо одна дія).
-      - Приклад: "Єгор футбол завтра о 16:00 на стадіоні Лена, Тимур танці в п'ятницю о 18:00 в школі" = 2 actions з різними memberId, title, startTime, location.
 
       Для action "add":
         - memberId (ID члена сім'ї — ОБОВ'ЯЗКОВО вкажи правильний ID)
-        - title (назва події: футбол, тренування, танці тощо)
-        - startTime (ISO 8601 — ОБОВ'ЯЗКОВО)
+        - title (назва події: футбол, тренування, танці, плавання, концерт тощо)
+        - startTime (ISO 8601 — ОБОВ'ЯЗКОВО! Завжди парси з тексту!)
         - endTime (ISO 8601 — якщо не вказано, +1 година від startTime)
-        - location (місце проведення — використай бібліотеку місць якщо є збіг, інакше запиши як є)
+        - location (місце проведення — ОБОВ'ЯЗКОВО якщо згадується в тексті!)
 
       Для action "delete":
         - eventId (ID існуючої події зі списку вище)
@@ -1758,72 +1645,6 @@ ${placesContext ? `
       const deleteIds: number[] = [];
       const deleteEventLines: string[] = [];
       const unknownPlaces: { name: string; eventId: number }[] = [];
-
-      // ─── Validate completeness of "add" actions before saving ───
-      const addActions = actions.filter((a: any) => a.action === 'add' && a.title);
-      if (addActions.length > 0) {
-        const missingFields: Set<string> = new Set();
-        const msgText = (transcription || textToProcess || '').toLowerCase();
-
-        // Check if month was explicitly mentioned
-        const monthKeywords = ['січн', 'лют', 'берез', 'квітн', 'трав', 'черв', 'лип', 'серпн', 'верес', 'жовтн', 'листопад', 'грудн'];
-        const hasMonth = monthKeywords.some(m => msgText.includes(m));
-        const hasRelativeDate = /завтра|сьогодні|післязавтра|понеділок|вівторок|середу|четвер|п.ятниц|субот|неділ/.test(msgText);
-        if (!hasMonth && !hasRelativeDate) {
-          missingFields.add('month');
-        }
-
-        // Check location for each add action
-        const actionsNeedingLocation: string[] = [];
-        for (const act of addActions) {
-          if (!act.location) {
-            const knownType = findEventType(act.title);
-            if (!knownType || !knownType.default_location) {
-              actionsNeedingLocation.push(act.title);
-              missingFields.add('location');
-            }
-          }
-        }
-
-        if (missingFields.size > 0) {
-          // Don't add yet — ask for missing info
-          pendingFollowUp.set(chatId, {
-            type: 'incomplete_events',
-            actions,
-            transcription: transcription || '',
-            missingFields: Array.from(missingFields),
-            members: members as any[],
-          });
-
-          const questions: string[] = [];
-          if (missingFields.has('month')) {
-            const assumedDate = addActions[0]?.startTime ? new Date(addActions[0].startTime) : new Date();
-            const monthUk = assumedDate.toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', month: 'long' });
-            questions.push(`📅 Який місяць? (${monthUk}? — відповідай "так" або вкажи місяць)`);
-          }
-          if (missingFields.has('location')) {
-            const uniqueTitles = [...new Set(actionsNeedingLocation)];
-            questions.push(`📍 Де відбувається ${uniqueTitles.join(', ')}?`);
-          }
-
-          // Show preview of what will be added
-          const previewLines = addActions.map((act: any) => {
-            const member = members.find((m: any) => m.id === act.memberId);
-            const memberName = member ? (member as any).name : 'Сім\'я';
-            const dateStr = act.startTime
-              ? new Date(act.startTime).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' })
-              : '?';
-            return `  • ${act.title} — ${memberName} — ${dateStr}`;
-          });
-
-          await sendMessage(
-            `🎧 <b>Почув:</b> <i>${transcription}</i>\n\n` +
-            `📝 <b>Хочу додати:</b>\n${previewLines.join('\n')}\n\n` +
-            `❓ <b>Уточни:</b>\n${questions.join('\n')}`
-          );
-          return;
-        }
-      }
 
       // Show what was heard (transcription)
       if (transcription) {
