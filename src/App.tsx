@@ -138,21 +138,10 @@ function PhotoSlideshow({ photos, fallbackUrl, color, name, mode = 'circle' }: {
   if (mode === 'cell') {
     return (
       <div className="relative w-full overflow-hidden" style={{ backgroundColor: `${color}20`, aspectRatio: '3/4' }}>
-        {/* Previous image (stays visible as background during crossfade) */}
-        <img
-          src={prevSrc}
-          alt=""
-          className="absolute inset-0 w-full h-full object-contain"
-          referrerPolicy="no-referrer"
-        />
-        {/* Current image fades in on top */}
         <img
           src={currentSrc}
           alt={name || ''}
-          className={cn(
-            "absolute inset-0 w-full h-full object-contain transition-opacity duration-700 ease-in-out",
-            transitioning ? 'opacity-0' : 'opacity-100'
-          )}
+          className="absolute inset-0 w-full h-full object-contain"
           referrerPolicy="no-referrer"
         />
         {/* Name overlay at bottom */}
@@ -175,11 +164,10 @@ function PhotoSlideshow({ photos, fallbackUrl, color, name, mode = 'circle' }: {
   if (mode === 'avatar') {
     return (
       <div className="relative w-24 h-24 rounded-full overflow-hidden bg-white" style={{ borderColor: color, borderWidth: 2 }}>
-        <img src={prevSrc} alt="" className="absolute inset-0 w-full h-full rounded-full object-cover" referrerPolicy="no-referrer" />
         <img
           src={currentSrc}
           alt=""
-          className={cn("absolute inset-0 w-full h-full rounded-full object-cover transition-opacity duration-700 ease-in-out", transitioning ? 'opacity-0' : 'opacity-100')}
+          className="absolute inset-0 w-full h-full rounded-full object-cover"
           referrerPolicy="no-referrer"
         />
       </div>
