@@ -152,7 +152,11 @@ function addEventType(shortName: string, fullName?: string, defaultLocation?: st
 }
 
 // Pending follow-up questions per chat (chatId → { type, context })
-const pendingFollowUp = new Map<string, { type: 'place' | 'event_type'; name: string; eventId?: number }>();
+const pendingFollowUp = new Map<string,
+  | { type: 'place'; name: string; eventId?: number }
+  | { type: 'event_type'; name: string; eventId?: number }
+  | { type: 'incomplete_events'; actions: any[]; transcription: string; missingFields: string[]; members: any[] }
+>();
 
 // Helper functions for settings
 const getSetting = (key: string) => {
@@ -1314,6 +1318,134 @@ async function processMessage(update: any) {
     const answer = update.message.text.trim();
     pendingFollowUp.delete(chatId);
 
+    if (followUp.type === 'incomplete_events') {
+      const { actions: pendingActions, missingFields, transcription: origTranscription, members: pendingMembers } = followUp;
+      const answerLower = answer.toLowerCase();
+
+      // Parse month from answer
+      const monthMap: Record<string, number> = {
+        'січень': 0, 'січня': 0, 'січ': 0,
+        'лютий': 1, 'лютого': 1, 'лют': 1,
+        'березень': 2, 'березня': 2, 'берез': 2,
+        'квітень': 3, 'квітня': 3, 'квіт': 3,
+        'травень': 4, 'травня': 4, 'трав': 4,
+        'червень': 5, 'червня': 5, 'черв': 5,
+        'липень': 6, 'липня': 6, 'лип': 6,
+        'серпень': 7, 'серпня': 7, 'серп': 7,
+        'вересень': 8, 'вересня': 8, 'верес': 8,
+        'жовтень': 9, 'жовтня': 9, 'жовт': 9,
+        'листопад': 10, 'листопада': 10, 'лист': 10,
+        'грудень': 11, 'грудня': 11, 'груд': 11,
+      };
+      const confirmWords = ['так', 'да', 'ок', 'yes', 'ага', 'угу', '+'];
+      const isConfirm = confirmWords.some(w => answerLower === w || answerLower.startsWith(w + ' ') || answerLower.startsWith(w + ','));
+
+      let resolvedMonth: number | null = null;
+      let locationPart = answer;
+
+      if (missingFields.includes('month')) {
+        if (isConfirm) {
+          resolvedMonth = -1; // keep Gemini's month
+          // Remove confirm word from start for location extraction
+          locationPart = answer.replace(/^(так|да|ок|yes|ага|угу|\+)[,.\s]*/i, '').trim();
+        } else {
+          for (const [key, val] of Object.entries(monthMap)) {
+            if (answerLower.includes(key)) {
+              resolvedMonth = val;
+              // Remove month word from answer for location extraction
+              locationPart = answer.replace(new RegExp(key, 'i'), '').replace(/^[,.\s]+/, '').trim();
+              break;
+            }
+          }
+        }
+      }
+
+      // Extract location
+      let resolvedLocation = '';
+      if (missingFields.includes('location')) {
+        // If both month and location were missing, location is the remaining text after month
+        if (missingFields.includes('month')) {
+          resolvedLocation = locationPart;
+        } else {
+          resolvedLocation = answer;
+        }
+      }
+
+      // Update actions with resolved info
+      const lines: string[] = [];
+      const unknownPlaces: { name: string; eventId: number }[] = [];
+
+      for (const act of pendingActions) {
+        if (act.action !== 'add') continue;
+
+        // Update month
+        if (resolvedMonth !== null && resolvedMonth >= 0 && act.startTime) {
+          const d = new Date(act.startTime);
+          d.setMonth(resolvedMonth);
+          act.startTime = d.toISOString();
+          if (act.endTime) {
+            const de = new Date(act.endTime);
+            de.setMonth(resolvedMonth);
+            act.endTime = de.toISOString();
+          }
+        }
+
+        // Update location
+        let location = act.location || '';
+        if (!location && resolvedLocation) {
+          location = resolvedLocation;
+          act.location = resolvedLocation;
+        }
+        // Check library
+        if (location) {
+          const knownPlace = findPlace(location);
+          if (knownPlace && knownPlace.description) {
+            location = `${knownPlace.short_name} (${[knownPlace.description, knownPlace.address].filter(Boolean).join(', ')})`;
+          }
+        }
+        if (!location) {
+          const knownType = findEventType(act.title);
+          if (knownType && knownType.default_location) {
+            location = knownType.default_location;
+          }
+        }
+
+        // Now save event
+        const result = db.prepare('INSERT INTO events (member_id, title, start_time, end_time, location) VALUES (?, ?, ?, ?, ?)')
+          .run(act.memberId || null, act.title, act.startTime, act.endTime || act.startTime, location);
+        const newEventId = result.lastInsertRowid as number;
+
+        if (act.location && !findPlace(act.location)) {
+          unknownPlaces.push({ name: act.location, eventId: newEventId });
+        }
+        if (!findEventType(act.title)) {
+          addEventType(act.title, '', location, 60);
+        }
+
+        const member = pendingMembers.find((m: any) => m.id === act.memberId);
+        const memberName = member ? (member as any).name : 'Сім\'я';
+        const dateStr = new Date(act.startTime).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
+        lines.push(`✅ <b>Додано:</b> ${act.title}\n👤 ${memberName}\n🕐 ${dateStr}${location ? `\n📍 ${location}` : ''}`);
+      }
+
+      if (lines.length > 0) {
+        await sendMessage(lines.join('\n\n'));
+      }
+
+      // Ask about unknown places
+      if (unknownPlaces.length > 0) {
+        const unknown = unknownPlaces[0];
+        pendingFollowUp.set(chatId, { type: 'place', name: unknown.name, eventId: unknown.eventId });
+        await sendMessage(
+          `❓ <b>Що таке "${unknown.name}"?</b>\n\n` +
+          `Напиши коротко — наприклад:\n` +
+          `<i>"басейн, Rådhusgata 28, Lena"</i>\n\n` +
+          `Я збережу це в бібліотеку місць 📚`
+        );
+      }
+      return;
+    }
+
     if (followUp.type === 'place') {
       // Parse answer: try to extract description and address
       addPlace(followUp.name, '', '', answer);
@@ -1626,6 +1758,72 @@ ${placesContext ? `
       const deleteIds: number[] = [];
       const deleteEventLines: string[] = [];
       const unknownPlaces: { name: string; eventId: number }[] = [];
+
+      // ─── Validate completeness of "add" actions before saving ───
+      const addActions = actions.filter((a: any) => a.action === 'add' && a.title);
+      if (addActions.length > 0) {
+        const missingFields: Set<string> = new Set();
+        const msgText = (transcription || textToProcess || '').toLowerCase();
+
+        // Check if month was explicitly mentioned
+        const monthKeywords = ['січн', 'лют', 'берез', 'квітн', 'трав', 'черв', 'лип', 'серпн', 'верес', 'жовтн', 'листопад', 'грудн'];
+        const hasMonth = monthKeywords.some(m => msgText.includes(m));
+        const hasRelativeDate = /завтра|сьогодні|післязавтра|понеділок|вівторок|середу|четвер|п.ятниц|субот|неділ/.test(msgText);
+        if (!hasMonth && !hasRelativeDate) {
+          missingFields.add('month');
+        }
+
+        // Check location for each add action
+        const actionsNeedingLocation: string[] = [];
+        for (const act of addActions) {
+          if (!act.location) {
+            const knownType = findEventType(act.title);
+            if (!knownType || !knownType.default_location) {
+              actionsNeedingLocation.push(act.title);
+              missingFields.add('location');
+            }
+          }
+        }
+
+        if (missingFields.size > 0) {
+          // Don't add yet — ask for missing info
+          pendingFollowUp.set(chatId, {
+            type: 'incomplete_events',
+            actions,
+            transcription: transcription || '',
+            missingFields: Array.from(missingFields),
+            members: members as any[],
+          });
+
+          const questions: string[] = [];
+          if (missingFields.has('month')) {
+            const assumedDate = addActions[0]?.startTime ? new Date(addActions[0].startTime) : new Date();
+            const monthUk = assumedDate.toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', month: 'long' });
+            questions.push(`📅 Який місяць? (${monthUk}? — відповідай "так" або вкажи місяць)`);
+          }
+          if (missingFields.has('location')) {
+            const uniqueTitles = [...new Set(actionsNeedingLocation)];
+            questions.push(`📍 Де відбувається ${uniqueTitles.join(', ')}?`);
+          }
+
+          // Show preview of what will be added
+          const previewLines = addActions.map((act: any) => {
+            const member = members.find((m: any) => m.id === act.memberId);
+            const memberName = member ? (member as any).name : 'Сім\'я';
+            const dateStr = act.startTime
+              ? new Date(act.startTime).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' })
+              : '?';
+            return `  • ${act.title} — ${memberName} — ${dateStr}`;
+          });
+
+          await sendMessage(
+            `🎧 <b>Почув:</b> <i>${transcription}</i>\n\n` +
+            `📝 <b>Хочу додати:</b>\n${previewLines.join('\n')}\n\n` +
+            `❓ <b>Уточни:</b>\n${questions.join('\n')}`
+          );
+          return;
+        }
+      }
 
       // Show what was heard (transcription)
       if (transcription) {
