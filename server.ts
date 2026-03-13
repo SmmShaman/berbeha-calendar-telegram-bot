@@ -845,7 +845,7 @@ async function translateTitles(titles: string[]): Promise<Record<string, string>
     const prompt = `Translate these Norwegian sports/event titles to Ukrainian. Keep proper names (places, people) as-is. Return a JSON object where keys are originals and values are translations.\n\n${untranslated.map((t, i) => `${i + 1}. "${t}"`).join('\n')}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-2.0-flash',
       contents: { parts: [{ text: prompt }] },
       config: { responseMimeType: 'application/json' },
     });
@@ -1429,7 +1429,7 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
     }
 
     const geminiConfig = {
-      model: 'gemini-2.5-flash',
+      model: 'gemini-2.0-flash',
       contents: { parts },
       config: {
         systemInstruction: systemPrompt,
@@ -1540,6 +1540,15 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
               if (!act.location && bestAction.location) act.location = bestAction.location;
               if (!act.memberId && bestAction.memberId) act.memberId = bestAction.memberId;
             }
+          }
+        }
+
+        // Sanitize: truncate titles that are too long (Gemini thinking leak)
+        for (const act of actions) {
+          if (act.title && act.title.length > 50) {
+            // Take first meaningful part before any period or excessive text
+            const clean = act.title.split(/[.!]\s/)[0].trim();
+            act.title = clean.length > 50 ? clean.substring(0, 50) : clean;
           }
         }
       }
