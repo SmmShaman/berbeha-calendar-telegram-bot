@@ -144,13 +144,13 @@ function PhotoSlideshow({ photos, fallbackUrl, color, name, mode = 'circle' }: {
   // Cell mode — fills the entire header cell with photo, square aspect ratio
   if (mode === 'cell') {
     return (
-      <div className="relative w-full overflow-hidden" style={{ backgroundColor: `${color}20`, aspectRatio: '1' }}>
+      <div className="relative w-full overflow-hidden" style={{ backgroundColor: `${color}20`, aspectRatio: '3/4' }}>
         {/* Previous image (visible during transition) */}
         {photos.length > 1 && (
           <img
             src={prevSrc}
             alt=""
-            className="absolute inset-0 w-full h-full object-cover"
+            className="absolute inset-0 w-full h-full object-contain"
             referrerPolicy="no-referrer"
           />
         )}
@@ -159,7 +159,7 @@ function PhotoSlideshow({ photos, fallbackUrl, color, name, mode = 'circle' }: {
           src={currentSrc}
           alt={name || ''}
           className={cn(
-            "absolute inset-0 w-full h-full object-cover transition-all duration-700 ease-in-out",
+            "absolute inset-0 w-full h-full object-contain transition-all duration-700 ease-in-out",
             transitioning ? transition.exit : transition.enter
           )}
           referrerPolicy="no-referrer"
