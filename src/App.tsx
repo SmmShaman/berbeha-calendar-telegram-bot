@@ -1111,7 +1111,7 @@ function CalendarApp({
   };
 
   return (
-    <div className="h-screen bg-slate-50 text-slate-900 font-sans flex flex-col overflow-hidden">
+    <div className="h-screen bg-slate-50 text-slate-900 font-sans flex flex-col overflow-hidden max-w-screen-2xl mx-auto">
       {/* ── Header ── */}
       <header className="bg-white shadow-sm border-b border-slate-200 p-2 md:p-3 flex items-center justify-between shrink-0 gap-2">
         <div className="flex items-center gap-2 md:gap-4">
