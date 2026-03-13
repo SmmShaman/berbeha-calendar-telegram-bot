@@ -1396,22 +1396,28 @@ async function processMessage(update: any) {
       ? eventTypesLib.map(e => `"${e.short_name}" → ${[e.full_name, e.default_location ? `місце: ${e.default_location}` : ''].filter(Boolean).join(', ')}, ${e.default_duration_min} хв`).join('\n')
       : '';
 
-    const systemPrompt = `Ти парсер для сімейного календаря. Твоя єдина задача — з повідомлення витягти: хто, що, коли, де.
-
-ПОВЕРНИ ТІЛЬКИ JSON з полями transcription та actions. НЕ копіюй ці інструкції у відповідь!
-
-title — ТІЛЬКИ коротка назва події (1-2 слова): "плавання", "футбол", "концерт", "танці".
+    const systemPrompt = `Ти парсер для сімейного календаря. З повідомлення витягни: хто, що, коли, де.
 
 Зараз: ${new Date().toISOString()}. Часовий пояс: Europe/Oslo.
-
 Сім'я: ${membersList}.
+Дії: add, delete (eventId), reschedule (eventId+newStartTime), query (memberId+period).
+${placesContext ? `Місця: ${placesContext}` : ''}${eventTypesContext ? `Типи подій: ${eventTypesContext}` : ''}${eventsContext ? `Існуючі події:\n${eventsContext}` : ''}
 
-Дії: add (додати), delete (видалити, eventId), reschedule (перенести, eventId+newStartTime), query (розклад, memberId+period).
-${placesContext ? `\nМісця: ${placesContext}` : ''}${eventTypesContext ? `\nТипи подій: ${eventTypesContext}` : ''}${eventsContext ? `\nІснуючі події:\n${eventsContext}` : ''}
+ГОЛОВНЕ ПРАВИЛО: кожна action — це ПОВНИЙ ЗАВЕРШЕНИЙ запис з УСІМА полями: action, memberId, title, startTime, endTime, location.
+НІКОЛИ не розбивай одну подію на кілька actions! Якщо подія одна для двох людей — створи ДВІ повні копії.
 
-Парсинг дати: "14 березня о 10" = 2026-03-14T10:00:00+01:00. "в середу" = найближча середа. ЗАВЖДИ заповнюй startTime!
-Парсинг місця: "в Лену" / "в школі" / "Lena Ungdomsskole" — це location. Норвезькі назви = місце.
-Декілька подій: "концерт о 19, потім тренування о 20:30" = ДВІ actions.`;
+ПРИКЛАД: "Віталій та Мирон зустріч в НАВ 20 березня о 10:00" →
+{"actions":[
+  {"action":"add","memberId":1,"title":"Зустріч в НАВ","startTime":"2026-03-20T10:00:00+01:00","endTime":"2026-03-20T11:00:00+01:00","location":"NAV"},
+  {"action":"add","memberId":7,"title":"Зустріч в НАВ","startTime":"2026-03-20T10:00:00+01:00","endTime":"2026-03-20T11:00:00+01:00","location":"NAV"}
+]}
+
+ПРИКЛАД: "Мирон плавання 14 березня о 18:00 в Лена Унгдомскуле" →
+{"actions":[
+  {"action":"add","memberId":7,"title":"Плавання","startTime":"2026-03-14T18:00:00+01:00","endTime":"2026-03-14T19:00:00+01:00","location":"Lena Ungdomsskole"}
+]}
+
+title — коротка назва (1-3 слова). startTime — ОБОВ'ЯЗКОВО ISO 8601. location — місце якщо згадується.`;
 
     const parts: any[] = [];
     if (audioBase64) {
@@ -1491,8 +1497,52 @@ ${placesContext ? `\nМісця: ${placesContext}` : ''}${eventTypesContext ? `\
         }
         return;
       }
-      const { actions, transcription } = parsed;
+      let { actions, transcription } = parsed;
       console.log('🤖 Gemini result:', JSON.stringify(parsed, null, 2));
+
+      // ─── Post-process: fix broken/split actions from Gemini ───
+      if (actions && actions.length > 0) {
+        const addActions = actions.filter((a: any) => a.action === 'add');
+        if (addActions.length > 1) {
+          // Find the most complete action (has the most fields)
+          const bestAction = addActions.reduce((best: any, act: any) => {
+            const score = (act.startTime ? 1 : 0) + (act.location ? 1 : 0) + (act.endTime ? 1 : 0) + (act.memberId ? 1 : 0) + (act.title ? 1 : 0);
+            const bestScore = (best.startTime ? 1 : 0) + (best.location ? 1 : 0) + (best.endTime ? 1 : 0) + (best.memberId ? 1 : 0) + (best.title ? 1 : 0);
+            return score > bestScore ? act : best;
+          }, addActions[0]);
+
+          // Check if actions are split: some have memberId but no startTime, others have startTime but no memberId
+          const withMemberNoTime = addActions.filter((a: any) => a.memberId && !a.startTime);
+          const withTimeNoMember = addActions.filter((a: any) => !a.memberId && a.startTime);
+
+          if (withMemberNoTime.length > 0 && withTimeNoMember.length > 0) {
+            // Merge: create complete actions for each member
+            const mergedActions: any[] = [];
+            for (const memberAct of withMemberNoTime) {
+              mergedActions.push({
+                action: 'add',
+                memberId: memberAct.memberId,
+                title: bestAction.title || memberAct.title,
+                startTime: bestAction.startTime,
+                endTime: bestAction.endTime,
+                location: bestAction.location,
+              });
+            }
+            // Replace add actions with merged ones, keep non-add actions
+            const nonAddActions = actions.filter((a: any) => a.action !== 'add');
+            actions = [...nonAddActions, ...mergedActions];
+            console.log('🤖 Fixed split actions:', JSON.stringify(actions, null, 2));
+          } else {
+            // Fill missing fields from best action into incomplete actions
+            for (const act of addActions) {
+              if (!act.startTime && bestAction.startTime) act.startTime = bestAction.startTime;
+              if (!act.endTime && bestAction.endTime) act.endTime = bestAction.endTime;
+              if (!act.location && bestAction.location) act.location = bestAction.location;
+              if (!act.memberId && bestAction.memberId) act.memberId = bestAction.memberId;
+            }
+          }
+        }
+      }
 
       // If no actions but text looks like a schedule query, handle it directly
       const queryText = (transcription || textToProcess || '').toLowerCase();
