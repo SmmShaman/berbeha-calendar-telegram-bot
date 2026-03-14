@@ -1880,10 +1880,19 @@ ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JS
               periodLabel = 'цей місяць';
               break;
             }
-            default: { // today
-              start = new Date(now); start.setHours(0,0,0,0);
-              end = new Date(now); end.setHours(23,59,59,999);
-              periodLabel = 'сьогодні';
+            default: {
+              // Try to parse "N days" or "N днів" from period string
+              const daysMatch = (act.period || '').match(/(\d+)/);
+              if (daysMatch) {
+                const numDays = parseInt(daysMatch[1], 10);
+                start = new Date(now); start.setHours(0,0,0,0);
+                end = new Date(now); end.setDate(end.getDate() + numDays); end.setHours(23,59,59,999);
+                periodLabel = `найближчі ${numDays} днів`;
+              } else {
+                start = new Date(now); start.setHours(0,0,0,0);
+                end = new Date(now); end.setHours(23,59,59,999);
+                periodLabel = 'сьогодні';
+              }
             }
           }
 
