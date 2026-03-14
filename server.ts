@@ -1313,8 +1313,35 @@ async function processMessage(update: any) {
 
   // Check for pending follow-up answers (e.g. "What is NAV?")
   const followUp = pendingFollowUp.get(chatId);
-  if (followUp && update.message.text && !update.message.text.startsWith('/')) {
-    const answer = update.message.text.trim();
+  if (followUp && (update.message.text || update.message.voice || update.message.video_note || update.message.audio) && !(update.message.text || '').startsWith('/')) {
+    let answer = (update.message.text || '').trim();
+    // If voice/audio answer — transcribe first
+    if (!answer && (update.message.voice || update.message.video_note || update.message.audio)) {
+      const fileId = (update.message.voice || update.message.video_note || update.message.audio).file_id;
+      const mimeType = update.message.video_note ? 'video/mp4' : 'audio/ogg';
+      try {
+        const audioData = await downloadTelegramFile(telegramToken, fileId);
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const transcribeResp = await Promise.race([
+          ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: { parts: [
+              { inlineData: { data: audioData, mimeType } },
+              { text: 'Транскрибуй це аудіо українською. Напиши ТІЛЬКИ текст що сказано.' },
+            ]},
+            config: { thinkingConfig: { thinkingBudget: 0 } },
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000)),
+        ]) as any;
+        answer = transcribeResp.text?.trim() || '';
+        console.log('🤖 Follow-up voice transcribed:', answer);
+      } catch (err: any) {
+        console.error('🤖 Follow-up transcription failed:', err.message);
+        await sendMessage('⚠️ Не вдалося розпізнати аудіо. Напиши текстом.');
+        return;
+      }
+    }
+    if (!answer) { return; }
     pendingFollowUp.delete(chatId);
 
     if (followUp.type === 'place') {
