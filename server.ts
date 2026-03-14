@@ -1054,6 +1054,33 @@ async function processCallbackQuery(update: any) {
   const messageId = cb.message.message_id;
   const data = cb.data;
 
+  // place_ok:NAME — user confirmed place is fine as-is
+  if (data.startsWith('place_ok:')) {
+    const placeName = data.substring('place_ok:'.length);
+    addPlace(placeName, '', '', '');
+    await tgEditMessage(telegramToken, chatId, messageId,
+      `📚 <b>Збережено місце:</b> ${placeName}`
+    );
+    await tgAnswer(telegramToken, cb.id, 'Збережено!');
+    return;
+  }
+
+  // place_detail:NAME:EVENT_ID — user wants to add details for place
+  if (data.startsWith('place_detail:')) {
+    const parts = data.substring('place_detail:'.length);
+    const colonIdx = parts.lastIndexOf(':');
+    const placeName = parts.substring(0, colonIdx);
+    const eventId = parseInt(parts.substring(colonIdx + 1), 10);
+    pendingFollowUp.set(chatId, { type: 'place', name: placeName, eventId });
+    await tgEditMessage(telegramToken, chatId, messageId,
+      `📝 <b>Опиши "${placeName}":</b>\n\n` +
+      `Напиши або надиктуй коротко — наприклад:\n` +
+      `<i>"басейн, Rådhusgata 28, Lena"</i>`
+    );
+    await tgAnswer(telegramToken, cb.id);
+    return;
+  }
+
   // batch_delete:ID1,ID2,ID3 — delete multiple events
   if (data.startsWith('batch_delete:')) {
     const ids = data.split(':')[1].split(',').map(Number);
@@ -1885,17 +1912,26 @@ ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JS
         await sendMessage(lines.join('\n\n'));
       }
 
-      // Ask about unknown places (first one only, to not overwhelm)
+      // Ask about unknown places with confirmation buttons
       if (unknownPlaces.length > 0) {
-        const unknown = unknownPlaces[0];
-        pendingFollowUp.set(chatId, { type: 'place', name: unknown.name, eventId: unknown.eventId });
-        await sendMessage(
-          `❓ <b>Що таке "${unknown.name}"?</b>\n\n` +
-          `Напиши коротко — наприклад:\n` +
-          `<i>"служба соцзахисту в Лені"</i>\n` +
-          `<i>"басейн, Rådhusgata 28, Lena"</i>\n\n` +
-          `Я збережу це в бібліотеку місць 📚`
-        );
+        // Deduplicate by name
+        const uniquePlaces = [...new Map(unknownPlaces.map(p => [p.name, p])).values()];
+        for (const unknown of uniquePlaces) {
+          const buttons = {
+            inline_keyboard: [
+              [
+                { text: `✅ Так, "${unknown.name}" — ок`, callback_data: `place_ok:${unknown.name}` },
+              ],
+              [
+                { text: '📝 Уточнити деталі', callback_data: `place_detail:${unknown.name}:${unknown.eventId}` },
+              ],
+            ],
+          };
+          await sendMessage(
+            `📍 Нове місце: <b>${unknown.name}</b>\nЗберегти як є?`,
+            buttons
+          );
+        }
       }
     }
   } catch (error) {
