@@ -1054,6 +1054,28 @@ async function processCallbackQuery(update: any) {
   const messageId = cb.message.message_id;
   const data = cb.data;
 
+  // del_place:NAME — delete a place from library
+  if (data.startsWith('del_place:')) {
+    const placeName = data.substring('del_place:'.length);
+    try { db.prepare('DELETE FROM places_library WHERE short_name = ?').run(placeName); } catch {}
+    await tgEditMessage(telegramToken, chatId, messageId,
+      `🗑 Місце <b>${placeName}</b> видалено з бібліотеки.`
+    );
+    await tgAnswer(telegramToken, cb.id, 'Видалено!');
+    return;
+  }
+
+  // edit_place:NAME — edit place description
+  if (data.startsWith('edit_place:')) {
+    const placeName = data.substring('edit_place:'.length);
+    pendingFollowUp.set(chatId, { type: 'place', name: placeName, eventId: 0 });
+    await tgEditMessage(telegramToken, chatId, messageId,
+      `📝 <b>Опиши "${placeName}":</b>\n\nНапиши або надиктуй опис місця.`
+    );
+    await tgAnswer(telegramToken, cb.id);
+    return;
+  }
+
   // place_ok:NAME — user confirmed place is fine as-is
   if (data.startsWith('place_ok:')) {
     const placeName = data.substring('place_ok:'.length);
@@ -1329,6 +1351,27 @@ async function processMessage(update: any) {
   if (update.message.text === '/today') {
     setSetting('month_offset', '0');
     await sendMessage('📅 Календар перемкнуто на поточний місяць.');
+    return;
+  }
+
+  // /places — show and manage places library
+  if (update.message.text === '/places') {
+    const places = getPlacesLibrary();
+    if (places.length === 0) {
+      await sendMessage('📚 Бібліотека місць порожня.');
+    } else {
+      const list = places.map((p, i) => {
+        const desc = [p.description, p.address].filter(Boolean).join(', ');
+        return `${i + 1}. <b>${p.short_name}</b>${desc ? ` — ${desc}` : ''}`;
+      }).join('\n');
+      const buttons = {
+        inline_keyboard: places.map(p => ([
+          { text: `🗑 ${p.short_name}`, callback_data: `del_place:${p.short_name}` },
+          { text: `📝 ${p.short_name}`, callback_data: `edit_place:${p.short_name}` },
+        ])),
+      };
+      await sendMessage(`📚 <b>Бібліотека місць (${places.length}):</b>\n\n${list}`, buttons);
+    }
     return;
   }
 
