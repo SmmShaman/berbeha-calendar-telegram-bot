@@ -1849,50 +1849,62 @@ ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JS
           }
         }
 
-        // Schedule query
+        // Schedule query — flexible period parsing
         if (act.action === 'query') {
           const now = new Date();
           let start: Date, end: Date, periodLabel: string;
-          switch (act.period) {
-            case 'tomorrow': {
-              start = new Date(now); start.setDate(start.getDate() + 1); start.setHours(0,0,0,0);
-              end = new Date(start); end.setHours(23,59,59,999);
-              periodLabel = 'завтра';
-              break;
-            }
-            case 'this_week': {
-              const dayOfWeek = now.getDay() || 7;
-              start = new Date(now); start.setDate(start.getDate() - dayOfWeek + 1); start.setHours(0,0,0,0);
-              end = new Date(start); end.setDate(end.getDate() + 6); end.setHours(23,59,59,999);
-              periodLabel = 'цей тиждень';
-              break;
-            }
-            case 'next_week': {
-              const dow = now.getDay() || 7;
-              start = new Date(now); start.setDate(start.getDate() - dow + 8); start.setHours(0,0,0,0);
-              end = new Date(start); end.setDate(end.getDate() + 6); end.setHours(23,59,59,999);
-              periodLabel = 'наступний тиждень';
-              break;
-            }
-            case 'this_month': {
-              start = new Date(now.getFullYear(), now.getMonth(), 1);
-              end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-              periodLabel = 'цей місяць';
-              break;
-            }
-            default: {
-              // Try to parse "N days" or "N днів" from period string
-              const daysMatch = (act.period || '').match(/(\d+)/);
-              if (daysMatch) {
-                const numDays = parseInt(daysMatch[1], 10);
+          const p = (act.period || '').toLowerCase();
+
+          if (/today|сьогодні|сегодня/.test(p)) {
+            start = new Date(now); start.setHours(0,0,0,0);
+            end = new Date(now); end.setHours(23,59,59,999);
+            periodLabel = 'сьогодні';
+          } else if (/tomorrow|завтра/.test(p)) {
+            start = new Date(now); start.setDate(start.getDate() + 1); start.setHours(0,0,0,0);
+            end = new Date(start); end.setHours(23,59,59,999);
+            periodLabel = 'завтра';
+          } else if (/this.?week|цей.?тижд|поточн.?тижд/.test(p)) {
+            const dow = now.getDay() || 7;
+            start = new Date(now); start.setDate(start.getDate() - dow + 1); start.setHours(0,0,0,0);
+            end = new Date(start); end.setDate(end.getDate() + 6); end.setHours(23,59,59,999);
+            periodLabel = 'цей тиждень';
+          } else if (/next.?week|наступн.?тижд|следующ.?недел/.test(p)) {
+            const dow = now.getDay() || 7;
+            start = new Date(now); start.setDate(start.getDate() - dow + 8); start.setHours(0,0,0,0);
+            end = new Date(start); end.setDate(end.getDate() + 6); end.setHours(23,59,59,999);
+            periodLabel = 'наступний тиждень';
+          } else if (/this.?month|цей.?місяць|поточн.?місяць/.test(p)) {
+            start = new Date(now.getFullYear(), now.getMonth(), 1);
+            end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+            periodLabel = 'цей місяць';
+          } else if (/next.?month|наступн.?місяць|следующ.?месяц/.test(p)) {
+            start = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+            end = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59, 999);
+            periodLabel = 'наступний місяць';
+          } else {
+            // Try to extract number: "10 days", "2 weeks", "3 тижні", "20 днів"
+            const numMatch = p.match(/(\d+)/);
+            if (numMatch) {
+              const num = parseInt(numMatch[1], 10);
+              if (/week|тижд|недел/.test(p)) {
                 start = new Date(now); start.setHours(0,0,0,0);
-                end = new Date(now); end.setDate(end.getDate() + numDays); end.setHours(23,59,59,999);
-                periodLabel = `найближчі ${numDays} днів`;
+                end = new Date(now); end.setDate(end.getDate() + num * 7); end.setHours(23,59,59,999);
+                periodLabel = `найближчі ${num} тижн.`;
+              } else if (/month|місяц/.test(p)) {
+                start = new Date(now); start.setHours(0,0,0,0);
+                end = new Date(now.getFullYear(), now.getMonth() + num, now.getDate(), 23, 59, 59, 999);
+                periodLabel = `найближчі ${num} міс.`;
               } else {
+                // Default: treat number as days
                 start = new Date(now); start.setHours(0,0,0,0);
-                end = new Date(now); end.setHours(23,59,59,999);
-                periodLabel = 'сьогодні';
+                end = new Date(now); end.setDate(end.getDate() + num); end.setHours(23,59,59,999);
+                periodLabel = `найближчі ${num} днів`;
               }
+            } else {
+              // Fallback: next 7 days
+              start = new Date(now); start.setHours(0,0,0,0);
+              end = new Date(now); end.setDate(end.getDate() + 7); end.setHours(23,59,59,999);
+              periodLabel = 'найближчі 7 днів';
             }
           }
 
