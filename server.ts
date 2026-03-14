@@ -1674,7 +1674,7 @@ ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JS
 
       // If no actions but text looks like a schedule query, handle it directly
       const queryText = (transcription || textToProcess || '').toLowerCase();
-      const isScheduleQuery = /розклад|які події|що заплановано|що буде|які плани|schedule|events/.test(queryText);
+      const isScheduleQuery = /розклад|які події|що заплановано|що буде|які плани|schedule|events|графік|покажи події|склади|всі події/.test(queryText);
 
       if ((!actions || actions.length === 0) && isScheduleQuery) {
         // Determine member from text
@@ -1712,10 +1712,12 @@ ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JS
           end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
           periodLabel = 'цей місяць';
         } else {
-          // Default: next 7 days
+          // Try to extract "N днів/days" from text
+          const daysMatch = queryText.match(/(\d+)\s*(?:днів|дні|день|days?)/);
+          const numDays = daysMatch ? parseInt(daysMatch[1], 10) : 7;
           start = new Date(now); start.setHours(0,0,0,0);
-          end = new Date(now); end.setDate(end.getDate() + 7); end.setHours(23,59,59,999);
-          periodLabel = 'найближчі 7 днів';
+          end = new Date(now); end.setDate(end.getDate() + numDays); end.setHours(23,59,59,999);
+          periodLabel = `найближчі ${numDays} днів`;
         }
 
         // Fetch from DB
