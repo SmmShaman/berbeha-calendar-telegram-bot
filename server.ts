@@ -1,7 +1,7 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import Database from 'better-sqlite3';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import multer from 'multer';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -1396,28 +1396,11 @@ async function processMessage(update: any) {
       ? eventTypesLib.map(e => `"${e.short_name}" → ${[e.full_name, e.default_location ? `місце: ${e.default_location}` : ''].filter(Boolean).join(', ')}, ${e.default_duration_min} хв`).join('\n')
       : '';
 
-    const systemPrompt = `Ти парсер для сімейного календаря. З повідомлення витягни: хто, що, коли, де.
-
-Зараз: ${new Date().toISOString()}. Часовий пояс: Europe/Oslo.
+    const systemPrompt = `Парсер сімейного календаря. Зараз: ${new Date().toISOString()}. Timezone: +01:00.
 Сім'я: ${membersList}.
-Дії: add, delete (eventId), reschedule (eventId+newStartTime), query (memberId+period).
-${placesContext ? `Місця: ${placesContext}` : ''}${eventTypesContext ? `Типи подій: ${eventTypesContext}` : ''}${eventsContext ? `Існуючі події:\n${eventsContext}` : ''}
-
-ГОЛОВНЕ ПРАВИЛО: кожна action — це ПОВНИЙ ЗАВЕРШЕНИЙ запис з УСІМА полями: action, memberId, title, startTime, endTime, location.
-НІКОЛИ не розбивай одну подію на кілька actions! Якщо подія одна для двох людей — створи ДВІ повні копії.
-
-ПРИКЛАД: "Віталій та Мирон зустріч в НАВ 20 березня о 10:00" →
-{"actions":[
-  {"action":"add","memberId":1,"title":"Зустріч в НАВ","startTime":"2026-03-20T10:00:00+01:00","endTime":"2026-03-20T11:00:00+01:00","location":"NAV"},
-  {"action":"add","memberId":7,"title":"Зустріч в НАВ","startTime":"2026-03-20T10:00:00+01:00","endTime":"2026-03-20T11:00:00+01:00","location":"NAV"}
-]}
-
-ПРИКЛАД: "Мирон плавання 14 березня о 18:00 в Лена Унгдомскуле" →
-{"actions":[
-  {"action":"add","memberId":7,"title":"Плавання","startTime":"2026-03-14T18:00:00+01:00","endTime":"2026-03-14T19:00:00+01:00","location":"Lena Ungdomsskole"}
-]}
-
-title — коротка назва (1-3 слова). startTime — ОБОВ'ЯЗКОВО ISO 8601. location — місце якщо згадується.`;
+${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JSON: {"transcription":"текст","actions":[{"action":"add","memberId":N,"title":"1-2 слова","startTime":"ISO8601+01:00","endTime":"ISO8601+01:00","location":"місце"}]}
+Дії: add, delete(eventId), reschedule(eventId,newStartTime), query(memberId,period).
+Для кожної людини — окрема action з УСІМА полями. endTime = startTime + 1 година якщо не вказано.`;
 
     // ─── Step 1: If audio, transcribe first with a simple fast request ───
     let transcribedText = textToProcess;
@@ -1448,7 +1431,7 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
       }
     }
 
-    // ─── Step 2: Parse text into calendar actions (no audio, fast) ───
+    // ─── Step 2: Parse text into calendar actions (no schema — faster) ───
     const parts: any[] = [{ text: 'Повідомлення від користувача: ' + transcribedText }];
 
     const geminiConfig = {
@@ -1458,32 +1441,6 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
         systemInstruction: systemPrompt,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json' as const,
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            transcription: { type: Type.STRING, description: 'Exact transcription of what was said' },
-            actions: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  action: { type: Type.STRING, description: 'add, delete, reschedule, or query' },
-                  memberId: { type: Type.INTEGER, description: 'Family member ID' },
-                  title: { type: Type.STRING, description: 'Short event name: плавання, футбол, концерт (1-2 words only!)' },
-                  startTime: { type: Type.STRING, description: 'ISO 8601 datetime with timezone' },
-                  endTime: { type: Type.STRING, description: 'ISO 8601 datetime, default +1h from startTime' },
-                  location: { type: Type.STRING, description: 'Place name from the message' },
-                  eventId: { type: Type.INTEGER },
-                  newStartTime: { type: Type.STRING },
-                  newEndTime: { type: Type.STRING },
-                  period: { type: Type.STRING, description: 'today, tomorrow, this_week, next_week, this_month' },
-                },
-                required: ['action'] as string[],
-              },
-            },
-          },
-          required: ['transcription', 'actions'] as string[],
-        },
       },
     };
 
@@ -1525,6 +1482,21 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
       // For audio: use the clean transcription from step 1
       if (audioBase64 && transcribedText) transcription = transcribedText;
       console.log('🤖 Gemini result:', JSON.stringify(parsed, null, 2));
+
+      // ─── Pre-process: expand memberId arrays into separate actions ───
+      if (actions && actions.length > 0) {
+        const expanded: any[] = [];
+        for (const act of actions) {
+          if (Array.isArray(act.memberId)) {
+            for (const mid of act.memberId) {
+              expanded.push({ ...act, memberId: mid });
+            }
+          } else {
+            expanded.push(act);
+          }
+        }
+        actions = expanded;
+      }
 
       // ─── Post-process: fix broken/split actions from Gemini ───
       if (actions && actions.length > 0) {
