@@ -1419,14 +1419,37 @@ ${placesContext ? `Місця: ${placesContext}` : ''}${eventTypesContext ? `Т�
 
 title — коротка назва (1-3 слова). startTime — ОБОВ'ЯЗКОВО ISO 8601. location — місце якщо згадується.`;
 
-    const parts: any[] = [];
+    // ─── Step 1: If audio, transcribe first with a simple fast request ───
+    let transcribedText = textToProcess;
     if (audioBase64) {
+      console.log('🤖 Step 1: Transcribing audio...');
       const mimeType = mediaType === 'video_note' ? 'video/mp4' : 'audio/ogg';
-      parts.push({ inlineData: { data: audioBase64, mimeType } });
-      parts.push({ text: 'Розпізнай що сказано і витягни події з цього аудіо.' });
-    } else {
-      parts.push({ text: 'Повідомлення від користувача: ' + textToProcess });
+      try {
+        const transcribeResponse = await Promise.race([
+          ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: { parts: [
+              { inlineData: { data: audioBase64, mimeType } },
+              { text: 'Транскрибуй це аудіо українською. Напиши ТІЛЬКИ текст що сказано, нічого більше.' },
+            ]},
+            config: { thinkingConfig: { thinkingBudget: 0 } },
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Transcription timeout after 30s')), 30000)),
+        ]) as any;
+        transcribedText = transcribeResponse.text?.trim() || '';
+        console.log('🤖 Transcribed:', transcribedText);
+      } catch (trErr: any) {
+        console.error('🤖 Transcription failed:', trErr.message);
+        throw trErr;
+      }
+      if (!transcribedText) {
+        await sendMessage('⚠️ Не вдалося розпізнати аудіо. Спробуй текстом.');
+        return;
+      }
     }
+
+    // ─── Step 2: Parse text into calendar actions (no audio, fast) ───
+    const parts: any[] = [{ text: 'Повідомлення від користувача: ' + transcribedText }];
 
     const geminiConfig = {
       model: 'gemini-2.5-flash',
@@ -1499,6 +1522,8 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
         return;
       }
       let { actions, transcription } = parsed;
+      // For audio: use the clean transcription from step 1
+      if (audioBase64 && transcribedText) transcription = transcribedText;
       console.log('🤖 Gemini result:', JSON.stringify(parsed, null, 2));
 
       // ─── Post-process: fix broken/split actions from Gemini ───
