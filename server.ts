@@ -1057,7 +1057,7 @@ async function processCallbackQuery(update: any) {
   // del_place:NAME — delete a place from library
   if (data.startsWith('del_place:')) {
     const placeName = data.substring('del_place:'.length);
-    try { db.prepare('DELETE FROM places_library WHERE short_name = ?').run(placeName); } catch {}
+    try { db.prepare('DELETE FROM places WHERE short_name = ?').run(placeName); } catch {}
     await tgEditMessage(telegramToken, chatId, messageId,
       `🗑 Місце <b>${placeName}</b> видалено з бібліотеки.`
     );
