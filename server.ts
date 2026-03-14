@@ -1544,12 +1544,36 @@ title — коротка назва (1-3 слова). startTime — ОБОВ'Я�
           }
         }
 
-        // Sanitize: truncate titles that are too long (Gemini thinking leak)
+        // Sanitize: fix Gemini thinking leak — extract fields from bloated title
         for (const act of actions) {
+          if (act.title && act.title.length > 80) {
+            // Gemini dumped thinking into title — try to extract startTime, endTime, location
+            if (!act.startTime) {
+              const timeMatch = act.title.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})/);
+              if (timeMatch) act.startTime = timeMatch[1];
+            }
+            if (!act.endTime && act.startTime) {
+              const allTimes = act.title.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})/g);
+              if (allTimes && allTimes.length >= 2) act.endTime = allTimes[1];
+            }
+            if (!act.location) {
+              const locMatch = act.title.match(/(?:Місце|location)[:\s]+([A-Za-zÀ-žА-Яа-яіїєґ\s]+?)(?:\.|,|\n|$)/i);
+              if (locMatch) act.location = locMatch[1].trim();
+            }
+          }
+          // Always truncate long titles
           if (act.title && act.title.length > 50) {
-            // Take first meaningful part before any period or excessive text
-            const clean = act.title.split(/[.!]\s/)[0].trim();
-            act.title = clean.length > 50 ? clean.substring(0, 50) : clean;
+            // Take first sentence fragment (before parenthesis, period, or comma with space)
+            const clean = act.title.split(/[.(,]\s/)[0].trim();
+            act.title = clean.length > 50 ? clean.substring(0, 47) + '...' : clean;
+          }
+          // Generate endTime if missing but startTime exists
+          if (act.startTime && !act.endTime) {
+            try {
+              const start = new Date(act.startTime);
+              start.setHours(start.getHours() + 1);
+              act.endTime = start.toISOString().replace('Z', '+01:00');
+            } catch {}
           }
         }
       }
