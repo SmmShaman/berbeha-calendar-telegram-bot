@@ -1294,7 +1294,7 @@ function CalendarApp({
               </div>
 
               {/* Table Body — grouped by weeks, with merged week number cell */}
-              <div className="flex flex-col flex-1 min-h-0" ref={calendarBodyRef}>
+              <div className="flex flex-col flex-1 min-h-0 overflow-y-auto" ref={calendarBodyRef}>
                 {(() => {
                   // Group days into weeks (Mon-Sun)
                   const weeks: { weekNum: number; days: { day: Date; dayIdx: number }[] }[] = [];
@@ -1313,13 +1313,13 @@ function CalendarApp({
                     const weekPct = (weekWeight / totalWeight) * 100;
 
                     return (
-                      <div key={week.weekNum} className="flex border-b border-slate-400" style={{ flex: `${weekPct} 0 0%` }}>
+                      <div key={week.weekNum} className="flex border-b border-slate-400 shrink-0">
                         {/* Week number — merged cell spanning all days of the week */}
                         <div className="w-4 md:w-5 shrink-0 border-r border-slate-300 bg-slate-50 flex items-center justify-center">
                           <span className="text-[8px] md:text-[10px] font-bold text-teal-600">{week.weekNum}</span>
                         </div>
                         {/* Days column */}
-                        <div className="flex flex-col flex-1 min-h-0">
+                        <div className="flex flex-col flex-1">
                 {week.days.map(({ day, dayIdx }) => {
                   const isToday = isSameDay(day, today);
                   const isWknd = isWeekend(day);
@@ -1331,9 +1331,13 @@ function CalendarApp({
                   // All events per member (both local and matched gcal)
                   const memberEvents = (mId: number) => dayEvents.filter(e => e.member_id === mId);
 
-                  const dayPct = (weights[dayIdx] / weekWeight) * 100;
                   const dist = Math.abs(dayIdx - centerIdx);
                   const isNearToday = dist <= LENS_RADIUS;
+                  // Calculate row height: base from lens weight + extra per event
+                  const maxEventsInDay = Math.max(...members.map(m => memberEvents(m.id).length), gcalGeneralEvents.length, 1);
+                  const baseHeight = isToday ? 64 : (isNearToday ? 36 : 22);
+                  const eventLineHeight = isNearToday ? 18 : 12;
+                  const dayMinHeight = baseHeight + Math.max(0, maxEventsInDay - 1) * eventLineHeight;
 
                   // Shorten location: take first meaningful part (building/venue name)
                   const shortLocation = (loc: string) => {
@@ -1423,11 +1427,11 @@ function CalendarApp({
                       key={day.toString()}
                       data-date={format(day, 'yyyy-MM-dd')}
                       className={cn(
-                        "flex flex-col border-b border-slate-200 overflow-hidden",
+                        "flex flex-col border-b border-slate-200",
                         isToday ? "bg-indigo-100 ring-2 ring-inset ring-indigo-400" :
                         isWknd ? "bg-pink-50" : "bg-white"
                       )}
-                      style={{ flex: `${dayPct} 0 0%` }}
+                      style={{ minHeight: `${dayMinHeight}px` }}
                     >
                       {/* General Google Calendar events (not matched to member) — full-width banner */}
                       {gcalGeneralEvents.length > 0 && (
