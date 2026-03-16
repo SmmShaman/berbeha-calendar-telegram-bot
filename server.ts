@@ -96,6 +96,15 @@ db.exec(`
     default_location TEXT,
     default_duration_min INTEGER DEFAULT 60
   );
+
+  CREATE TABLE IF NOT EXISTS restrictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    member_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    FOREIGN KEY(member_id) REFERENCES members(id)
+  );
 `);
 
 // Pre-populate family members if empty
@@ -307,6 +316,17 @@ app.post('/api/library/event-types', (req, res) => {
 });
 app.delete('/api/library/event-types/:id', (req, res) => {
   db.prepare('DELETE FROM event_types WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+
+// ─── Restrictions API ───
+app.get('/api/restrictions', (_req, res) => {
+  const restrictions = db.prepare('SELECT * FROM restrictions').all();
+  res.json(restrictions);
+});
+
+app.delete('/api/restrictions/:id', (req, res) => {
+  db.prepare('DELETE FROM restrictions WHERE id = ?').run(req.params.id);
   res.json({ success: true });
 });
 
@@ -1496,7 +1516,8 @@ async function processMessage(update: any) {
     const systemPrompt = `Парсер сімейного календаря. Зараз: ${new Date().toISOString()}. Timezone: +01:00.
 Сім'я: ${membersList}.
 ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JSON: {"transcription":"текст","actions":[{"action":"add","memberId":N,"title":"1-2 слова","startTime":"ISO8601+01:00","endTime":"ISO8601+01:00","location":"місце"}]}
-Дії: add, delete(eventId), reschedule(eventId,newStartTime), query(memberId,period).
+Дії: add, delete(eventId), reschedule(eventId,newStartTime), query(memberId,period), restrict(memberId,title,days).
+restrict: заборона/обмеження. Приклад: "Артему не можна плейстейшн 19 днів" → {"action":"restrict","memberId":N,"title":"плейстейшн","days":19}. Заборони НЕ є подіями!
 Для кожної людини — окрема action з УСІМА полями. endTime = startTime + 1 година якщо не вказано.`;
 
     // ─── Step 1: If audio, transcribe first with a simple fast request ───
@@ -1847,6 +1868,24 @@ ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JS
             const newDate = new Date(act.newStartTime).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
             lines.push(`📅 <b>Перенесено:</b> ${event.title} — ${event.member_name || 'Сім\'я'}\n<s>${oldDate}</s> → ${newDate}`);
           }
+        }
+
+        // Restriction/ban
+        if (act.action === 'restrict' && act.title && act.days) {
+          const days = parseInt(act.days, 10) || 7;
+          const now = new Date();
+          const startDate = now.toLocaleDateString('sv-SE', { timeZone: 'Europe/Oslo' }); // YYYY-MM-DD
+          const endDateObj = new Date(now);
+          endDateObj.setDate(endDateObj.getDate() + days - 1);
+          const endDate = endDateObj.toLocaleDateString('sv-SE', { timeZone: 'Europe/Oslo' });
+          const endDateUk = endDateObj.toLocaleDateString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium' });
+
+          db.prepare('INSERT INTO restrictions (member_id, title, start_date, end_date) VALUES (?, ?, ?, ?)')
+            .run(act.memberId, act.title, startDate, endDate);
+
+          const member = members.find((m: any) => m.id === act.memberId);
+          const memberName = member ? (member as any).name : 'Сім\'я';
+          lines.push(`🚫 <b>Заборона:</b> ${act.title}\n👤 ${memberName}\n📅 ${days} днів (до ${endDateUk})`);
         }
 
         // Schedule query — flexible period parsing

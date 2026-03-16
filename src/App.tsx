@@ -46,6 +46,14 @@ type Holiday = {
   countryCode: string;
 };
 
+type Restriction = {
+  id: number;
+  member_id: number;
+  title: string;
+  start_date: string;
+  end_date: string;
+};
+
 type MemberPhoto = {
   id: number;
   member_id: number;
@@ -832,6 +840,8 @@ function CalendarApp({
 }) {
   const [detailEvent, setDetailEvent] = useState<CalendarEvent | null>(null);
 
+  const [restrictions, setRestrictions] = useState<Restriction[]>([]);
+
   useEffect(() => {
     tryApi('/api/members').then(result => {
       if (result.ok) {
@@ -852,6 +862,13 @@ function CalendarApp({
     if (useApi) {
       const result = await tryApi<CalendarEvent[]>('/api/events');
       if (result.ok && result.data) setEvents(result.data);
+    }
+  }, [useApi]);
+
+  const fetchRestrictions = useCallback(async () => {
+    if (useApi) {
+      const result = await tryApi<Restriction[]>('/api/restrictions');
+      if (result.ok && result.data) setRestrictions(result.data);
     }
   }, [useApi]);
 
@@ -1033,10 +1050,11 @@ function CalendarApp({
     if (useApi) {
       fetchMembers();
       fetchEvents();
-      const interval = setInterval(() => { fetchEvents(); }, 5000);
+      fetchRestrictions();
+      const interval = setInterval(() => { fetchEvents(); fetchRestrictions(); }, 5000);
       return () => clearInterval(interval);
     }
-  }, [useApi, fetchMembers, fetchEvents]);
+  }, [useApi, fetchMembers, fetchEvents, fetchRestrictions]);
 
   // Rolling 21-day window: starts 3 days before today, offset shifts by 21 days
   const WINDOW_DAYS = 21;
@@ -1457,16 +1475,32 @@ function CalendarApp({
                           )}
                         </div>
 
-                        {members.map(m => (
+                        {members.map(m => {
+                          const dayStr = format(day, 'yyyy-MM-dd');
+                          const activeRestrictions = restrictions.filter(r =>
+                            r.member_id === m.id && dayStr >= r.start_date && dayStr <= r.end_date
+                          );
+                          const isRestricted = activeRestrictions.length > 0;
+                          return (
                           <div
                             key={m.id}
-                            className="flex-1 px-px border-r border-slate-200 min-w-0 overflow-hidden cursor-pointer hover:brightness-95 transition-all flex items-start"
-                            style={{ backgroundColor: `${m.color}12` }}
+                            className="flex-1 px-px border-r border-slate-200 min-w-0 overflow-hidden cursor-pointer hover:brightness-95 transition-all flex items-start relative"
+                            style={{
+                              backgroundColor: isRestricted ? '#fef2f2' : `${m.color}12`,
+                              ...(isRestricted ? { boxShadow: 'inset 0 0 0 2px #ef4444' } : {}),
+                            }}
                             onClick={() => handleCellClick(day, m.id)}
+                            title={isRestricted ? activeRestrictions.map(r => `🚫 ${r.title}`).join(', ') : undefined}
                           >
                             {renderEvents(memberEvents(m.id), m)}
+                            {isRestricted && (
+                              <span className="absolute bottom-0 right-0 text-[6px] md:text-[8px] bg-red-500 text-white px-0.5 rounded-tl leading-tight">
+                                🚫
+                              </span>
+                            )}
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   );
