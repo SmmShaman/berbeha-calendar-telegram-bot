@@ -1044,6 +1044,37 @@ function CalendarApp({
   const windowStart = addDays(addDays(new Date(), -DAYS_BEFORE_TODAY), monthOffset * WINDOW_DAYS);
   const windowEnd = addDays(windowStart, WINDOW_DAYS - 1);
 
+  // Track visible days for accurate header date range
+  const [visibleDays, setVisibleDays] = useState<Set<string>>(new Set());
+  const dayObserverRef = useRef<IntersectionObserver | null>(null);
+  const calendarBodyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (dayObserverRef.current) dayObserverRef.current.disconnect();
+    const root = calendarBodyRef.current;
+    if (!root) return;
+    const obs = new IntersectionObserver((entries) => {
+      setVisibleDays(prev => {
+        const next = new Set(prev);
+        for (const e of entries) {
+          const dateStr = (e.target as HTMLElement).dataset.date;
+          if (!dateStr) continue;
+          if (e.isIntersecting) next.add(dateStr); else next.delete(dateStr);
+        }
+        return next;
+      });
+    }, { root, threshold: 0.1 });
+    dayObserverRef.current = obs;
+    root.querySelectorAll('[data-date]').forEach(el => obs.observe(el));
+    return () => obs.disconnect();
+  }, [monthOffset, allEvents.length]);
+
+  const visibleRange = useMemo(() => {
+    if (visibleDays.size === 0) return { start: windowStart, end: windowEnd };
+    const sorted = [...visibleDays].sort();
+    return { start: new Date(sorted[0]), end: new Date(sorted[sorted.length - 1]) };
+  }, [visibleDays, windowStart, windowEnd]);
+
   useEffect(() => {
     fetchHolidays(getYear(windowStart));
     // Also fetch next year if window crosses year boundary
@@ -1100,7 +1131,7 @@ function CalendarApp({
                 <ChevronLeft className="w-4 h-4 md:w-5 md:h-5 text-slate-600" />
               </button>
               <h2 className="text-xs md:text-base font-semibold text-slate-800 min-w-[110px] md:min-w-[170px] text-center">
-                {format(windowStart, 'd MMM', { locale: uk })} — {format(windowEnd, 'd MMM yyyy', { locale: uk })}
+                {format(visibleRange.start, 'd MMM', { locale: uk })} — {format(visibleRange.end, 'd MMM yyyy', { locale: uk })}
               </h2>
               <button onClick={nextMonth} className="p-1 md:p-1.5 rounded-full hover:bg-slate-200 transition-colors">
                 <ChevronRight className="w-4 h-4 md:w-5 md:h-5 text-slate-600" />
@@ -1263,7 +1294,7 @@ function CalendarApp({
               </div>
 
               {/* Table Body — grouped by weeks, with merged week number cell */}
-              <div className="flex flex-col flex-1 min-h-0">
+              <div className="flex flex-col flex-1 min-h-0" ref={calendarBodyRef}>
                 {(() => {
                   // Group days into weeks (Mon-Sun)
                   const weeks: { weekNum: number; days: { day: Date; dayIdx: number }[] }[] = [];
@@ -1314,7 +1345,7 @@ function CalendarApp({
                   };
 
                   const renderEvents = (cellEvents: CalendarEvent[], member?: Member) => (
-                    <div className="flex flex-wrap gap-px overflow-hidden items-start content-start w-full h-full">
+                    <div className="flex flex-wrap gap-px overflow-y-auto items-start content-start w-full h-full">
                       {cellEvents.map(event => {
                         const isGcal = event.id < 0 && !event._spond;
                         const isSpond = !!event._spond;
@@ -1390,6 +1421,7 @@ function CalendarApp({
                   return (
                     <div
                       key={day.toString()}
+                      data-date={format(day, 'yyyy-MM-dd')}
                       className={cn(
                         "flex flex-col border-b border-slate-200 overflow-hidden",
                         isToday ? "bg-indigo-100 ring-2 ring-inset ring-indigo-400" :
