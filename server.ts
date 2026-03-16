@@ -1853,7 +1853,10 @@ ${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JS
         if (act.action === 'query') {
           const now = new Date();
           let start: Date, end: Date, periodLabel: string;
-          const p = (act.period || '').toLowerCase();
+          const rawPeriod = act.period;
+          const p = (typeof rawPeriod === 'object' && rawPeriod !== null
+            ? (rawPeriod.type || rawPeriod.value || JSON.stringify(rawPeriod))
+            : String(rawPeriod || '')).toLowerCase();
 
           if (/today|сьогодні|сегодня/.test(p)) {
             start = new Date(now); start.setHours(0,0,0,0);
