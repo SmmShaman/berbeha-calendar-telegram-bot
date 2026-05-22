@@ -176,6 +176,8 @@ const setSetting = (key: string, value: string) => {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
 };
 
+const getGeminiKey = () => getSetting('gemini_api_key') || process.env.GEMINI_API_KEY || '';
+
 // Auto-setup: save env vars to DB on first run
 function autoSetup() {
   if (process.env.TELEGRAM_BOT_TOKEN) {
@@ -183,6 +185,9 @@ function autoSetup() {
   }
   if (process.env.ADMIN_CHAT_IDS) {
     setSetting('admin_chat_ids', process.env.ADMIN_CHAT_IDS);
+  }
+  if (process.env.GEMINI_API_KEY) {
+    setSetting('gemini_api_key', process.env.GEMINI_API_KEY);
   }
 }
 
@@ -222,6 +227,7 @@ app.post('/api/settings', (req, res) => {
   if (req.body.spondChildMapping !== undefined) setSetting('spond_child_mapping', req.body.spondChildMapping);
   if (req.body.spondGroupMapping !== undefined) setSetting('spond_group_mapping', req.body.spondGroupMapping);
   if (req.body.spondAccounts !== undefined) setSetting('spond_accounts', JSON.stringify(req.body.spondAccounts));
+  if (req.body.geminiApiKey !== undefined) setSetting('gemini_api_key', req.body.geminiApiKey);
   res.json({ success: true });
 });
 
@@ -854,7 +860,7 @@ async function translateTitles(titles: string[]): Promise<Record<string, string>
 
   if (untranslated.length === 0) return result;
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getGeminiKey();
   if (!apiKey) {
     for (const t of untranslated) result[t] = t;
     return result;
@@ -1411,7 +1417,7 @@ async function processMessage(update: any) {
       const mimeType = update.message.video_note ? 'video/mp4' : 'audio/ogg';
       try {
         const audioData = await downloadTelegramFile(telegramToken, fileId);
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const ai = new GoogleGenAI({ apiKey: getGeminiKey() });
         const transcribeResp = await Promise.race([
           ai.models.generateContent({
             model: 'gemini-2.5-flash',
@@ -1484,7 +1490,7 @@ async function processMessage(update: any) {
       : '🔄 Обробляю...';
     await sendMessage(processingMsg);
 
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const ai = new GoogleGenAI({ apiKey: getGeminiKey() });
     const members = db.prepare('SELECT id, name FROM members').all();
     const membersList = members.map((m: any) => `${m.id}: ${m.name}`).join(', ');
 
