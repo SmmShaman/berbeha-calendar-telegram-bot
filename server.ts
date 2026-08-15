@@ -655,6 +655,15 @@ async function spondLoginAccount(account: SpondAccount): Promise<string | null> 
 
     // Read as text: a Cloudflare block page is HTML, and parsing it as JSON hides the real cause.
     const body = await res.text();
+
+    // Back off on the rate limit itself, not on how the rejection happens to be encoded —
+    // Cloudflare answers 429 sometimes as an HTML block page, sometimes as valid JSON.
+    if (res.status === 429) {
+      setSetting(`spond_login_cooldown:${account.email}`, String(Date.now() + SPOND_LOGIN_COOLDOWN));
+      console.error(`🏟️ Spond rate-limited (${account.email}): "${body.slice(0, 80).replace(/\s+/g, ' ')}" — backing off ${SPOND_LOGIN_COOLDOWN / 60000} min`);
+      return null;
+    }
+
     let data: any = null;
     try {
       data = JSON.parse(body);
