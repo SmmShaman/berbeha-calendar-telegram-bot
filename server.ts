@@ -277,8 +277,9 @@ app.post('/api/spond/accounts/remove', (req, res) => {
   accounts = accounts.filter(a => a.email.toLowerCase() !== email.toLowerCase());
   setSetting('spond_accounts', JSON.stringify(accounts));
 
-  // Clear per-account caches
-  spondTokens.delete(email);
+  // Clear per-account caches (the token is persisted too — drop that copy as well)
+  clearStoredSpondToken(email);
+  setSetting(`spond_login_cooldown:${email}`, '0');
   spondGroupsCaches.delete(email);
   spondProfileCaches.delete(email);
 
@@ -596,21 +597,82 @@ function getSpondAccounts(): SpondAccount[] {
   return [];
 }
 
+const SPOND_TOKEN_TTL = 50 * 60 * 1000;
+const SPOND_LOGIN_COOLDOWN = 30 * 60 * 1000;
+const SPOND_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+function readStoredSpondToken(email: string): { token: string; expiry: number } | null {
+  const raw = getSetting(`spond_token:${email}`);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.token && parsed?.expiry ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearStoredSpondToken(email: string) {
+  spondTokens.delete(email);
+  setSetting(`spond_token:${email}`, '');
+}
+
+/**
+ * Spond's API sits behind Cloudflare, which rate-limits /login PER IP — a block shows up as
+ * HTTP 429 with the body "error code: 1015", and since that body is HTML, the old
+ * `res.json()` turned it into the misleading `Unexpected token '<'` in the log.
+ *
+ * The token used to live in memory only, so every service restart dropped it and each account
+ * logged in again on the very next request. That storm is what got this VM blocked (verified
+ * 2026-08-15: /login answered 429/1015 while /profile still answered a normal 401, i.e. the IP
+ * was not banned — only the login endpoint was). So the token is now persisted in `settings`
+ * and survives restarts, and a rate-limit arms a cooldown instead of retrying: hammering a
+ * rate limiter only extends the block.
+ */
 async function spondLoginAccount(account: SpondAccount): Promise<string | null> {
   const cached = spondTokens.get(account.email);
   if (cached && Date.now() < cached.expiry) return cached.token;
 
+  const stored = readStoredSpondToken(account.email);
+  if (stored && Date.now() < stored.expiry) {
+    spondTokens.set(account.email, stored);
+    return stored.token;
+  }
+
+  const cooldownUntil = parseInt(getSetting(`spond_login_cooldown:${account.email}`) || '0', 10);
+  if (Date.now() < cooldownUntil) {
+    const mins = Math.ceil((cooldownUntil - Date.now()) / 60000);
+    console.warn(`🏟️ Spond login skipped (${account.email}): rate-limited, retrying in ~${mins} min`);
+    return null;
+  }
+
   try {
     const res = await fetch(`${SPOND_API}/login`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': SPOND_UA },
       body: JSON.stringify({ email: account.email, password: account.password }),
     });
-    const data = await res.json();
-    if (data.loginToken) {
-      spondTokens.set(account.email, { token: data.loginToken, expiry: Date.now() + 50 * 60 * 1000 });
-      return data.loginToken;
+
+    // Read as text: a Cloudflare block page is HTML, and parsing it as JSON hides the real cause.
+    const body = await res.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(body);
+    } catch {
+      setSetting(`spond_login_cooldown:${account.email}`, String(Date.now() + SPOND_LOGIN_COOLDOWN));
+      console.error(`🏟️ Spond login blocked (${account.email}): HTTP ${res.status}, non-JSON reply "${body.slice(0, 80).replace(/\s+/g, ' ')}" — backing off ${SPOND_LOGIN_COOLDOWN / 60000} min`);
+      return null;
     }
+
+    if (data.loginToken) {
+      const entry = { token: data.loginToken, expiry: Date.now() + SPOND_TOKEN_TTL };
+      spondTokens.set(account.email, entry);
+      setSetting(`spond_token:${account.email}`, JSON.stringify(entry));
+      setSetting(`spond_login_cooldown:${account.email}`, '0');
+      return entry.token;
+    }
+
+    console.error(`🏟️ Spond login rejected (${account.email}): HTTP ${res.status}, no loginToken in reply`);
     return null;
   } catch (err) {
     console.error(`Spond login error (${account.email}):`, err);
@@ -642,6 +704,12 @@ async function spondFetchAs(account: SpondAccount, endpoint: string, params?: Re
       'Authorization': `Bearer ${token}`,
     },
   });
+  // A persisted token outlives a restart, so it can also outlive its validity on Spond's side.
+  // Drop it on 401 instead of serving the stale one until the local TTL runs out.
+  if (res.status === 401) {
+    clearStoredSpondToken(account.email);
+    throw new Error(`Spond API 401 — token rejected (${account.email})`);
+  }
   if (!res.ok) throw new Error(`Spond API ${res.status} (${account.email})`);
   return res.json();
 }
