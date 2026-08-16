@@ -360,19 +360,36 @@ app.delete('/api/restrictions/:id', (req, res) => {
 // secret iCal address lets the server mirror them itself, with no login anywhere.
 //
 // The URL is a credential — anyone holding it reads the whole calendar — so it lives in
-// `settings.gcal_ics_urls` (a JSON array, one entry per family member's feed), never in
-// code and never in git.
+// `settings.gcal_ics_urls`, never in code and never in git.
+//
+// Each entry is either a bare URL string (a whole family calendar, where events are handed
+// to a child by keyword rules) or `{url, member_id, label}` — a feed belonging to ONE child,
+// typically a single Spond group. The tagged form is what makes four brothers' football
+// separable at all: the calendar itself carries no child, only a group name, so an event
+// titled just "Fotballtrening" is unattributable by title. Coming from that child's own feed
+// answers it outright, and survives the club renaming the group next season.
 
 const ICAL_SYNC_INTERVAL_MS = 15 * 60 * 1000;
 const ICAL_PAST_DAYS = 14;
 const ICAL_FUTURE_DAYS = 120;
 
-function getIcalUrls(): string[] {
+type IcalFeed = { url: string; member_id: number; label: string };
+
+function getIcalUrls(): IcalFeed[] {
   const raw = getSetting('gcal_ics_urls');
   if (!raw) return [];
   try {
     const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr.filter((u: unknown) => typeof u === 'string' && u.startsWith('http')) : [];
+    if (!Array.isArray(arr)) return [];
+    const feeds: IcalFeed[] = [];
+    for (const entry of arr) {
+      if (typeof entry === 'string' && entry.startsWith('http')) {
+        feeds.push({ url: entry, member_id: 0, label: '' });
+      } else if (entry && typeof entry.url === 'string' && entry.url.startsWith('http')) {
+        feeds.push({ url: entry.url, member_id: Number(entry.member_id) || 0, label: entry.label || '' });
+      }
+    }
+    return feeds;
   } catch {
     return [];
   }
@@ -517,15 +534,19 @@ async function syncIcalFeeds(): Promise<{ ok: boolean; feeds: number; events: nu
 
   icalSyncing = true;
   try {
-    const collected = new Map<string, IcsEvent>();
+    const collected = new Map<string, IcsEvent & { owner: number }>();
     let okFeeds = 0;
-    for (const url of urls) {
+    // Untagged family calendars first, then per-child feeds: when the same training sits in
+    // both (a parent accepted the Spond invite into their own calendar), UID dedup keeps one
+    // copy, and it must be the one that knows whose child it is.
+    const ordered = [...urls].sort((a, b) => (a.member_id ? 1 : 0) - (b.member_id ? 1 : 0));
+    for (const feed of ordered) {
       try {
-        const res = await fetch(url, { headers: { 'User-Agent': 'berbeha-calendar/1.0' } });
-        if (!res.ok) { console.error(`📅 iCal feed HTTP ${res.status}`); continue; }
+        const res = await fetch(feed.url, { headers: { 'User-Agent': 'berbeha-calendar/1.0' } });
+        if (!res.ok) { console.error(`📅 iCal feed HTTP ${res.status} (${feed.label || 'family'})`); continue; }
         const text = await res.text();
-        if (!text.includes('BEGIN:VCALENDAR')) { console.error('📅 iCal feed did not return a calendar'); continue; }
-        for (const e of parseIcs(text)) collected.set(e.uid, e); // same event in two feeds → once
+        if (!text.includes('BEGIN:VCALENDAR')) { console.error(`📅 iCal feed returned no calendar (${feed.label || 'family'})`); continue; }
+        for (const e of parseIcs(text)) collected.set(e.uid, { ...e, owner: feed.member_id });
         okFeeds++;
       } catch (err: any) {
         console.error('📅 iCal feed failed:', err?.message || err);
@@ -552,7 +573,9 @@ async function syncIcalFeeds(): Promise<{ ok: boolean; feeds: number; events: nu
 
     db.transaction(() => {
       for (const e of collected.values()) {
-        const m = matchMemberForTitle(e.title);
+        // A feed dedicated to one child already answers "whose is this?" — only fall back to
+        // guessing from the title for the shared family calendars.
+        const m = e.owner ? { member_id: e.owner, title: e.title } : matchMemberForTitle(e.title);
         upsert.run(e.uid, m.member_id, m.title, e.start, e.end, e.location, now);
       }
       sweep.run(now); // rows absent from this run were deleted or moved in Google
