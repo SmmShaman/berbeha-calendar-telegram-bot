@@ -105,6 +105,21 @@ db.exec(`
     end_date TEXT NOT NULL,
     FOREIGN KEY(member_id) REFERENCES members(id)
   );
+
+  -- Google Calendar mirrored server-side from its secret iCal address, so devices that
+  -- never signed in to Google (the Boytasks TV kiosk) can see the family's events too.
+  -- DELIBERATELY NOT the events table: the web app already fetches these same events
+  -- straight from Google with the browser's token, so merging them in would show every
+  -- training twice in the grid. Nothing but the kiosk reads this table.
+  CREATE TABLE IF NOT EXISTS ical_events (
+    uid TEXT PRIMARY KEY,
+    member_id INTEGER,
+    title TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    location TEXT,
+    synced_at TEXT
+  );
 `);
 
 // Pre-populate family members if empty
@@ -336,6 +351,239 @@ app.delete('/api/restrictions/:id', (req, res) => {
   db.prepare('DELETE FROM restrictions WHERE id = ?').run(req.params.id);
   res.json({ success: true });
 });
+
+// ─── Google Calendar via secret iCal ──────────────────────────
+//
+// Why this exists: Google Calendar events reach the web app only through the BROWSER's
+// OAuth token, so they live nowhere on this server — a device that never signed in to
+// Google (the Boytasks TV kiosk) can never see them. Subscribing to the calendar's own
+// secret iCal address lets the server mirror them itself, with no login anywhere.
+//
+// The URL is a credential — anyone holding it reads the whole calendar — so it lives in
+// `settings.gcal_ics_urls` (a JSON array, one entry per family member's feed), never in
+// code and never in git.
+
+const ICAL_SYNC_INTERVAL_MS = 15 * 60 * 1000;
+const ICAL_PAST_DAYS = 14;
+const ICAL_FUTURE_DAYS = 120;
+
+function getIcalUrls(): string[] {
+  const raw = getSetting('gcal_ics_urls');
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((u: unknown) => typeof u === 'string' && u.startsWith('http')) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Minutes that `tz` is ahead of UTC at that instant. */
+function tzOffsetMinutes(date: Date, tz: string): number {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const p: Record<string, string> = {};
+  for (const part of dtf.formatToParts(date)) p[part.type] = part.value;
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour === 24 ? 0 : +p.hour, +p.minute, +p.second);
+  return (asUTC - date.getTime()) / 60000;
+}
+
+/**
+ * Wall-clock time in a named zone → absolute ISO instant. Two passes because the offset
+ * itself depends on the instant we are solving for (CET vs CEST); the second pass settles
+ * every case except the hour that DST skips, which no calendar schedules into anyway.
+ */
+function zonedToIso(y: number, mo: number, d: number, h: number, mi: number, tz: string): string {
+  const wall = Date.UTC(y, mo - 1, d, h, mi);
+  let guess = wall;
+  for (let i = 0; i < 2; i++) guess = wall - tzOffsetMinutes(new Date(guess), tz) * 60000;
+  return new Date(guess).toISOString();
+}
+
+/** One DTSTART/DTEND property → ISO instant. Handles UTC, TZID and all-day (VALUE=DATE). */
+function icsDateToIso(propParams: string, value: string): string | null {
+  const v = value.trim();
+  const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?$/.exec(v);
+  if (!m) return null;
+  const [, y, mo, d, hh, mi, , z] = m;
+  if (!hh) return zonedToIso(+y, +mo, +d, 0, 0, 'Europe/Oslo'); // all-day → local midnight
+  if (z) return new Date(Date.UTC(+y, +mo - 1, +d, +hh, +mi)).toISOString();
+  const tzid = /TZID=([^;:]+)/.exec(propParams)?.[1] || 'Europe/Oslo';
+  try {
+    return zonedToIso(+y, +mo, +d, +hh, +mi, tzid);
+  } catch {
+    return zonedToIso(+y, +mo, +d, +hh, +mi, 'Europe/Oslo');
+  }
+}
+
+type IcsEvent = { uid: string; title: string; start: string; end: string; location: string };
+
+function parseIcs(text: string): IcsEvent[] {
+  // Unfold: iCal wraps long lines by starting the continuation with a space or tab.
+  const unfolded = text.replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '');
+  const unescape = (s: string) => s.replace(/\\n/gi, ' ').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\');
+
+  const out: IcsEvent[] = [];
+  const windowStart = Date.now() - ICAL_PAST_DAYS * 86400000;
+  const windowEnd = Date.now() + ICAL_FUTURE_DAYS * 86400000;
+
+  for (const block of unfolded.split('BEGIN:VEVENT').slice(1)) {
+    const body = block.split('END:VEVENT')[0];
+    const prop = (name: string) => {
+      const re = new RegExp(`^${name}([^:\\r\\n]*):(.*)$`, 'm');
+      const m = re.exec(body);
+      return m ? { params: m[1], value: m[2].trim() } : null;
+    };
+
+    if (/^STATUS:CANCELLED/m.test(body)) continue;
+    const summary = prop('SUMMARY');
+    const title = summary ? unescape(summary.value) : '';
+    if (!title) continue; // Google exports a handful of title-less rows; nothing to show
+
+    const dtStart = prop('DTSTART');
+    if (!dtStart) continue;
+    const startIso = icsDateToIso(dtStart.params, dtStart.value);
+    if (!startIso) continue;
+
+    const dtEnd = prop('DTEND');
+    const endIso = (dtEnd && icsDateToIso(dtEnd.params, dtEnd.value))
+      || new Date(new Date(startIso).getTime() + 3600000).toISOString();
+
+    const uid = prop('UID')?.value || `${title}|${startIso}`;
+    const location = unescape(prop('LOCATION')?.value || '');
+    const rrule = prop('RRULE')?.value || '';
+
+    const push = (s: string, e: string, suffix = '') => {
+      const t = new Date(s).getTime();
+      if (t >= windowStart && t <= windowEnd) out.push({ uid: uid + suffix, title, start: s, end: e, location });
+    };
+
+    if (!rrule) { push(startIso, endIso); continue; }
+
+    // Recurrence: expand DAILY/WEEKLY inside the sync window only. Anything else is kept as
+    // its single first occurrence rather than silently dropped.
+    const rule: Record<string, string> = {};
+    for (const part of rrule.split(';')) {
+      const [k, v] = part.split('=');
+      if (k && v) rule[k.toUpperCase()] = v;
+    }
+    const freq = rule.FREQ;
+    if (freq !== 'DAILY' && freq !== 'WEEKLY') { push(startIso, endIso); continue; }
+
+    const stepDays = (freq === 'DAILY' ? 1 : 7) * (parseInt(rule.INTERVAL || '1', 10) || 1);
+    const until = rule.UNTIL ? new Date(icsDateToIso('', rule.UNTIL) || '').getTime() : Infinity;
+    const maxCount = rule.COUNT ? parseInt(rule.COUNT, 10) : Infinity;
+    const duration = new Date(endIso).getTime() - new Date(startIso).getTime();
+
+    let cursor = new Date(startIso).getTime();
+    for (let n = 0; n < 500 && n < maxCount && cursor <= until && cursor <= windowEnd; n++) {
+      if (cursor >= windowStart) {
+        const s = new Date(cursor).toISOString();
+        push(s, new Date(cursor + duration).toISOString(), `#${s.slice(0, 10)}`);
+      }
+      cursor += stepDays * 86400000;
+    }
+  }
+  return out;
+}
+
+/**
+ * Assign each event to a family member the same way the web app does (`App.tsx`,
+ * `matchedGcalEvents`): keyword rules first — they also rename the event to the parent's own
+ * label — then a plain member-name match, otherwise nobody.
+ */
+function matchMemberForTitle(title: string): { member_id: number; title: string } {
+  const lower = title.toLowerCase();
+  try {
+    const rules: { keyword: string; member_id: number; label?: string }[] = JSON.parse(getSetting('gcal_keywords') || '[]');
+    const hit = rules.find(r => r.keyword && lower.includes(r.keyword.toLowerCase()));
+    if (hit) return { member_id: hit.member_id, title: hit.label || title };
+  } catch { /* no rules configured yet */ }
+
+  const members = db.prepare('SELECT id, name FROM members').all() as { id: number; name: string }[];
+  const byName = members.find(m => lower.includes(m.name.toLowerCase()));
+  return { member_id: byName ? byName.id : 0, title };
+}
+
+let icalSyncing = false;
+
+async function syncIcalFeeds(): Promise<{ ok: boolean; feeds: number; events: number; error?: string }> {
+  if (icalSyncing) return { ok: false, feeds: 0, events: 0, error: 'already running' };
+  const urls = getIcalUrls();
+  if (!urls.length) return { ok: false, feeds: 0, events: 0, error: 'no gcal_ics_urls configured' };
+
+  icalSyncing = true;
+  try {
+    const collected = new Map<string, IcsEvent>();
+    let okFeeds = 0;
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { headers: { 'User-Agent': 'berbeha-calendar/1.0' } });
+        if (!res.ok) { console.error(`📅 iCal feed HTTP ${res.status}`); continue; }
+        const text = await res.text();
+        if (!text.includes('BEGIN:VCALENDAR')) { console.error('📅 iCal feed did not return a calendar'); continue; }
+        for (const e of parseIcs(text)) collected.set(e.uid, e); // same event in two feeds → once
+        okFeeds++;
+      } catch (err: any) {
+        console.error('📅 iCal feed failed:', err?.message || err);
+      }
+    }
+
+    // A feed that answered but parsed to nothing must not wipe what we already show.
+    if (!okFeeds || !collected.size) {
+      const kept = (db.prepare('SELECT COUNT(*) c FROM ical_events').get() as { c: number }).c;
+      console.warn(`📅 iCal sync produced no events — keeping the ${kept} already stored`);
+      return { ok: false, feeds: okFeeds, events: 0, error: 'empty result' };
+    }
+
+    const now = new Date().toISOString();
+    const upsert = db.prepare(`
+      INSERT INTO ical_events (uid, member_id, title, start_time, end_time, location, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(uid) DO UPDATE SET
+        member_id = excluded.member_id, title = excluded.title,
+        start_time = excluded.start_time, end_time = excluded.end_time,
+        location = excluded.location, synced_at = excluded.synced_at
+    `);
+    const sweep = db.prepare('DELETE FROM ical_events WHERE synced_at < ?');
+
+    db.transaction(() => {
+      for (const e of collected.values()) {
+        const m = matchMemberForTitle(e.title);
+        upsert.run(e.uid, m.member_id, m.title, e.start, e.end, e.location, now);
+      }
+      sweep.run(now); // rows absent from this run were deleted or moved in Google
+    })();
+
+    console.log(`📅 iCal sync: ${collected.size} events from ${okFeeds}/${urls.length} feed(s)`);
+    return { ok: true, feeds: okFeeds, events: collected.size };
+  } finally {
+    icalSyncing = false;
+  }
+}
+
+// Read-only feed for the Boytasks TV kiosk (its worker proxies this; the web app does not
+// use it — the browser already has the same events straight from Google).
+app.get('/api/ical/events', (_req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM ical_events ORDER BY start_time').all();
+    res.json(rows);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/ical/sync', async (_req, res) => {
+  res.json(await syncIcalFeeds());
+});
+
+// Scheduled unconditionally: syncIcalFeeds() no-ops while no feed is configured, so a URL
+// added later starts syncing on its own instead of waiting for a restart.
+if (getIcalUrls().length) syncIcalFeeds().catch(() => {});
+setInterval(() => { syncIcalFeeds().catch(() => {}); }, ICAL_SYNC_INTERVAL_MS);
 
 app.get('/api/events', (req, res) => {
   const events = db.prepare('SELECT * FROM events').all();
