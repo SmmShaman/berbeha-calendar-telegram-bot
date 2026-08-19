@@ -918,7 +918,12 @@ async function spondLoginAccount(account: SpondAccount): Promise<string | null> 
   }
 
   try {
-    const res = await fetch(`${SPOND_API}/login`, {
+    // Spond retired POST /core/v1/login: it answers 404 with Spond's own JSON (verified
+    // 2026-08-19 from two different IPs, so it is a removed route, not a Cloudflare block).
+    // Its web client authenticates at /core/v1/auth2/login instead — GET on that path answers
+    // 405 Method Not Allowed while GET on the old one answers 404, which is how the live path
+    // was found without ever sending a password.
+    const res = await fetch(`${SPOND_API}/auth2/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': SPOND_UA },
       body: JSON.stringify({ email: account.email, password: account.password }),
@@ -944,15 +949,19 @@ async function spondLoginAccount(account: SpondAccount): Promise<string | null> 
       return null;
     }
 
-    if (data.loginToken) {
-      const entry = { token: data.loginToken, expiry: Date.now() + SPOND_TOKEN_TTL };
+    // The old route called it `loginToken`; auth2 may name it differently. Accept any of the
+    // shapes rather than tie the fix to one field name — the token is what matters.
+    const loginToken = data.loginToken || data.accessToken || data.token;
+    if (loginToken) {
+      const entry = { token: loginToken, expiry: Date.now() + SPOND_TOKEN_TTL };
       spondTokens.set(account.email, entry);
       setSetting(`spond_token:${account.email}`, JSON.stringify(entry));
       setSetting(`spond_login_cooldown:${account.email}`, '0');
       return entry.token;
     }
 
-    console.error(`🏟️ Spond login rejected (${account.email}): HTTP ${res.status}, no loginToken in reply`);
+    // Log the reply's FIELD NAMES only — never its values, one of them may be a token.
+    console.error(`🏟️ Spond login rejected (${account.email}): HTTP ${res.status}, no token in reply (fields: ${Object.keys(data || {}).join(',') || 'none'})`);
     return null;
   } catch (err) {
     console.error(`Spond login error (${account.email}):`, err);
