@@ -870,6 +870,8 @@ function getSpondAccounts(): SpondAccount[] {
 
 const SPOND_TOKEN_TTL = 50 * 60 * 1000;
 const SPOND_LOGIN_COOLDOWN = 30 * 60 * 1000;
+// A refused password is not a transient hiccup — wait far longer than for a rate limit.
+const SPOND_LOCKOUT_COOLDOWN = 60 * 60 * 1000;
 const SPOND_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 function readStoredSpondToken(email: string): { token: string; expiry: number } | null {
@@ -951,6 +953,16 @@ async function spondLoginAccount(account: SpondAccount): Promise<string | null> 
 
     // The old route called it `loginToken`; auth2 may name it differently. Accept any of the
     // shapes rather than tie the fix to one field name — the token is what matters.
+    // Spond locks a profile out after a burst of failed logins ("outOfLoginAttempts").
+    // Retrying then keeps the lock alive forever: the kiosk asks for the calendar every
+    // 10 minutes, which is two more failed attempts per account per poll. So a refusal
+    // arms the same cooldown a rate limit does, giving the lock a chance to lapse.
+    if (res.status === 401 || res.status === 403) {
+      setSetting(`spond_login_cooldown:${account.email}`, String(Date.now() + SPOND_LOCKOUT_COOLDOWN));
+      console.error(`🏟️ Spond login refused (${account.email}): HTTP ${res.status} ${data?.errorKey || ''} — backing off ${SPOND_LOCKOUT_COOLDOWN / 60000} min`);
+      return null;
+    }
+
     const loginToken = data.loginToken || data.accessToken || data.token;
     if (loginToken) {
       const entry = { token: loginToken, expiry: Date.now() + SPOND_TOKEN_TTL };
