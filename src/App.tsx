@@ -37,6 +37,8 @@ type CalendarEvent = {
   spond_group_id?: string;
   spond_group_name?: string;
   _spond?: boolean;
+  _ical?: boolean;
+  original_title?: string;
 };
 
 type Holiday = {
@@ -1025,8 +1027,60 @@ function CalendarApp({
     return Array.from(groups.values());
   }, [matchedGcalEvents, gcalEvents]);
 
-  // Combine local + Google Calendar events
-  const allEvents = [...events, ...matchedGcalEvents, ...spondEvents];
+  // The browser's own Google leg reads `calendars/primary` and nothing else, so signing in as
+  // one parent showed that parent's main calendar alone — the other parent's calendar and all
+  // six per-child calendars were invisible here even though the server already mirrors them
+  // (that is why the TV kiosk knew whose training it was and this screen did not). Read the
+  // same server mirror the kiosk reads.
+  const [icalEvents, setIcalEvents] = useState<CalendarEvent[]>([]);
+
+  const fetchIcalEvents = useCallback(async () => {
+    if (!useApi) return;
+    const result = await tryApi<any[]>('/api/ical/events');
+    if (!result.ok || !result.data) return;
+    setIcalEvents(result.data.map((e, i) => ({
+      id: -(100000 + i), // negative, like the other read-only feeds
+      member_id: e.member_id || 0,
+      title: e.title || '(Без назви)',
+      start_time: e.start_time,
+      end_time: e.end_time || e.start_time,
+      location: e.location || '',
+      _ical: true,
+    })));
+  }, [useApi]);
+
+  useEffect(() => {
+    fetchIcalEvents();
+    const interval = setInterval(fetchIcalEvents, 300000); // the server itself syncs every 15 min
+    return () => clearInterval(interval);
+  }, [fetchIcalEvents]);
+
+  // Combine every source, then drop the copies. One training reaches us up to three times:
+  // from Spond (which knows the child and translates the heading), from the iCal mirror, and
+  // from this browser's own Google leg. The iteration order IS the preference — hand-dictated
+  // first, then Spond, then the mirror, then the browser copy. Times differ by minutes (the
+  // Google copy starts at Spond's meet-up time), so matching is loose on both axes.
+  const allEvents = useMemo(() => {
+    const norm = (t: string) => (t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const COINCIDE_MS = 30 * 60 * 1000;
+    const ordered = [...events, ...spondEvents, ...icalEvents, ...matchedGcalEvents];
+    const owned = ordered.filter(e => e.member_id)
+      .map(e => ({ ts: new Date(e.start_time).getTime(), title: norm(e.original_title || e.title) }));
+    const kept: { member_id: number; ts: number; title: string }[] = [];
+    const out: CalendarEvent[] = [];
+    for (const e of ordered) {
+      const ts = new Date(e.start_time).getTime();
+      if (isNaN(ts)) continue;
+      const title = norm(e.original_title || e.title);
+      // A nameless copy of a training somebody already owns adds nothing but a banner.
+      if (!e.member_id && owned.some(o => o.title === title && Math.abs(o.ts - ts) <= COINCIDE_MS)) continue;
+      if (e.member_id && kept.some(k => k.member_id === e.member_id && k.title === title
+        && Math.abs(k.ts - ts) <= COINCIDE_MS)) continue;
+      if (e.member_id) kept.push({ member_id: e.member_id, ts, title });
+      out.push(e);
+    }
+    return out;
+  }, [events, spondEvents, icalEvents, matchedGcalEvents]);
 
   useEffect(() => { saveToStorage('calendar_members', members); }, [members]);
   useEffect(() => { saveToStorage('calendar_events', events); }, [events]);
