@@ -87,6 +87,16 @@ berbeha-calendar-telegram-bot/
   `-flash-lite` are already 404 for any key on a newer project, even though `/v1beta/models` still
   lists them. Lite is the deliberate default: 500 free requests a day (full Flash gets 20) and it
   accepts `thinkingBudget: 0`, which 3.x full Flash rejects outright.
+- **Free-tier ceilings, measured 2026-08-26 (not guessed):** Gemini Lite **500 requests/day**,
+  Groq whisper **2000 requests / 7200 audio-seconds a day** (read off the `x-ratelimit-*`
+  response headers). One bot message costs ONE Gemini call (~400 tokens) plus one Groq call
+  when it is voice. `translateTitles` batches every new heading into a SINGLE call and caches
+  the result in the `translations` table, so it costs ~0/day in steady state. `settings.
+  llm_usage:<date>` keeps a per-day tally of both.
+- **A failure must say WHY.** Until 2026-08-26 every error came back as the same «❌ Помилка
+  обробки», which is precisely how a revoked API key survived from April to August unnoticed —
+  the bot looked like it was having a bad day. `llmFailureReason()` separates an exhausted
+  quota, a dead key and a retired model. Never collapse those back into one message.
 - **Speech does NOT go to Gemini first** — `transcribeAudio()` calls Groq `whisper-large-v3` and
   falls back to Gemini. On one clip Whisper heard «Привіт, працюю зараз.» and Gemini Lite heard
   «Тревіть працюю зараз.»; a garbled transcript writes a WRONG event, which is worse than none.
