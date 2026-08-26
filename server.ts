@@ -202,6 +202,39 @@ const getGroqKey = () => getSetting('groq_api_key') || process.env.GROQ_API_KEY 
  */
 const getGeminiModel = () => getSetting('gemini_model') || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
+/**
+ * A day-keyed tally of LLM calls, so «are we near the free-tier ceiling?» is answered by a
+ * number instead of a guess. Both tiers are per DAY: Gemini Lite gives 500 requests, Groq
+ * whisper 2000 requests / 7200 audio-seconds. Cheap to keep, and it is the only record we
+ * have — the providers show usage in a dashboard nobody watches.
+ */
+function bumpLlmUsage(kind: 'gemini' | 'groq') {
+  const key = `llm_usage:${new Date().toISOString().slice(0, 10)}`;
+  let row: Record<string, number> = {};
+  try { row = JSON.parse(getSetting(key) || '{}'); } catch { /* start a fresh tally */ }
+  row[kind] = (row[kind] || 0) + 1;
+  setSetting(key, JSON.stringify(row));
+}
+
+/**
+ * Why the failure happened, in words the parent can act on. Until 2026-08-26 every failure
+ * came back as the same «❌ Помилка обробки» — which is exactly how a revoked API key stayed
+ * unnoticed from April to August: the bot looked like it was merely having a bad day.
+ */
+function llmFailureReason(err: any): string | null {
+  const m = String(err?.message || err || '');
+  if (/429|RESOURCE_EXHAUSTED|quota/i.test(m)) {
+    return '⚠️ Денний ліміт LLM вичерпано. Спробуй завтра або зміни модель у налаштуваннях.';
+  }
+  if (/API key not valid|API_KEY_INVALID|PERMISSION_DENIED|CONSUMER_SUSPENDED|\b40[13]\b/i.test(m)) {
+    return '⚠️ Ключ LLM недійсний або відкликаний — бот не зможе писати події, доки його не оновлять.';
+  }
+  if (/no longer available|NOT_FOUND|\b404\b/i.test(m)) {
+    return `⚠️ Модель «${getGeminiModel()}» більше не доступна — треба вказати нову в налаштуваннях.`;
+  }
+  return null;
+}
+
 // Auto-setup: save env vars to DB on first run
 function autoSetup() {
   if (process.env.TELEGRAM_BOT_TOKEN) {
@@ -1467,6 +1500,7 @@ async function transcribeAudio(audioBase64: string, mimeType: string): Promise<s
       const data: any = await res.json();
       if (data?.text) {
         console.log('🎙️ Transcribed via Groq whisper-large-v3');
+        bumpLlmUsage('groq');
         return String(data.text).trim();
       }
       console.error('🎙️ Groq transcription returned no text:', JSON.stringify(data).slice(0, 300));
@@ -1488,6 +1522,7 @@ async function transcribeAudio(audioBase64: string, mimeType: string): Promise<s
     new Promise((_, reject) => setTimeout(() => reject(new Error('Transcription timeout after 30s')), 30000)),
   ]) as any;
   console.log('🎙️ Transcribed via Gemini', getGeminiModel());
+  bumpLlmUsage('gemini');
   return resp.text?.trim() || '';
 }
 
@@ -2005,6 +2040,7 @@ restrict: заборона/обмеження. Приклад: "Артему н�
           ai.models.generateContent(geminiConfig),
           new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini timeout after 60s')), 60000)),
         ]);
+        bumpLlmUsage('gemini');
         break;
       } catch (retryErr: any) {
         console.error(`🤖 Gemini attempt ${attempt + 1} failed:`, retryErr.message);
@@ -2479,7 +2515,7 @@ restrict: заборона/обмеження. Приклад: "Артему н�
     }
   } catch (error) {
     console.error('Gemini error:', error);
-    await sendMessage('❌ Помилка обробки. Спробуй ще раз.');
+    await sendMessage(llmFailureReason(error) || '❌ Помилка обробки. Спробуй ще раз.');
   }
 }
 
