@@ -1065,6 +1065,10 @@ function CalendarApp({
     // exactly that noise — Google's "🤾‍♂️Håndball trening" against Spond's "🤾‍♂️ Håndballtrening".
     const norm = (t: string) => (t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
     const COINCIDE_MS = 30 * 60 * 1000;
+    // The two copies of ONE match can sit an hour apart — Google keeps Spond's meet-up time
+    // (16:45) while Spond keeps kick-off (17:30) — so the same-child rule needs a wider window
+    // than the unowned rule, which has no child to key on and must stay tight.
+    const SAME_CHILD_MS = 90 * 60 * 1000;
     const ordered = [...events, ...spondEvents, ...icalEvents, ...matchedGcalEvents];
     const owned = ordered.filter(e => e.member_id)
       .map(e => ({ ts: new Date(e.start_time).getTime(), title: norm(e.original_title || e.title) }));
@@ -1077,7 +1081,7 @@ function CalendarApp({
       // A nameless copy of a training somebody already owns adds nothing but a banner.
       if (!e.member_id && owned.some(o => o.title === title && Math.abs(o.ts - ts) <= COINCIDE_MS)) continue;
       if (e.member_id && kept.some(k => k.member_id === e.member_id && k.title === title
-        && Math.abs(k.ts - ts) <= COINCIDE_MS)) continue;
+        && Math.abs(k.ts - ts) <= SAME_CHILD_MS)) continue;
       if (e.member_id) kept.push({ member_id: e.member_id, ts, title });
       out.push(e);
     }
