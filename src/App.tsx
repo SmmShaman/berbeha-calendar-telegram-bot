@@ -1061,7 +1061,9 @@ function CalendarApp({
   // first, then Spond, then the mirror, then the browser copy. Times differ by minutes (the
   // Google copy starts at Spond's meet-up time), so matching is loose on both axes.
   const allEvents = useMemo(() => {
-    const norm = (t: string) => (t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    // Strip everything that is not a letter or a digit: the copies of one training differ by
+    // exactly that noise — Google's "🤾‍♂️Håndball trening" against Spond's "🤾‍♂️ Håndballtrening".
+    const norm = (t: string) => (t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
     const COINCIDE_MS = 30 * 60 * 1000;
     const ordered = [...events, ...spondEvents, ...icalEvents, ...matchedGcalEvents];
     const owned = ordered.filter(e => e.member_id)
