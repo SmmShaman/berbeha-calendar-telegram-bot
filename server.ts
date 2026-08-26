@@ -192,6 +192,15 @@ const setSetting = (key: string, value: string) => {
 };
 
 const getGeminiKey = () => getSetting('gemini_api_key') || process.env.GEMINI_API_KEY || '';
+const getGroqKey = () => getSetting('groq_api_key') || process.env.GROQ_API_KEY || '';
+/**
+ * The model name is a SETTING, not a constant: Google retires a generation and the old id
+ * starts answering 404 "no longer available to new users" — which is exactly how this bot went
+ * silent (a hardcoded 2.5-era model plus a revoked key, dead 18.08-26.08.2026). Lite is the
+ * deliberate default: it accepts thinkingBudget:0 and gets 500 free requests a day, while the
+ * full Flash models are capped at 20.
+ */
+const getGeminiModel = () => getSetting('gemini_model') || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
 // Auto-setup: save env vars to DB on first run
 function autoSetup() {
@@ -203,6 +212,12 @@ function autoSetup() {
   }
   if (process.env.GEMINI_API_KEY) {
     setSetting('gemini_api_key', process.env.GEMINI_API_KEY);
+  }
+  if (process.env.GROQ_API_KEY) {
+    setSetting('groq_api_key', process.env.GROQ_API_KEY);
+  }
+  if (process.env.GEMINI_MODEL) {
+    setSetting('gemini_model', process.env.GEMINI_MODEL);
   }
 }
 
@@ -963,9 +978,21 @@ async function spondLoginAccount(account: SpondAccount): Promise<string | null> 
       return null;
     }
 
-    const loginToken = data.loginToken || data.accessToken || data.token;
-    if (loginToken) {
-      const entry = { token: loginToken, expiry: Date.now() + SPOND_TOKEN_TTL };
+    // /auth2/login does NOT return a bare string: `accessToken` is an OBJECT
+    // `{token, expiration}` (verified 2026-08-26). Taken as-is it went out as the literal
+    // header `Bearer [object Object]`, so every API call answered 401, every 401 dropped the
+    // token, and the next poll logged in again — the storm that ended with Spond answering
+    // `outOfLoginAttempts` for stuardbmw. Accept both shapes and trust the server's expiry.
+    const rawToken = data.loginToken ?? data.accessToken ?? data.token;
+    const loginToken = typeof rawToken === 'string' ? rawToken : rawToken?.token;
+    const serverExpiry = rawToken && typeof rawToken === 'object' && rawToken.expiration
+      ? Date.parse(rawToken.expiration) : NaN;
+    if (typeof loginToken === 'string' && loginToken) {
+      // Refresh a minute before Spond's own expiry, and never later than our local TTL.
+      const expiry = Number.isFinite(serverExpiry)
+        ? Math.min(serverExpiry - 60_000, Date.now() + SPOND_TOKEN_TTL)
+        : Date.now() + SPOND_TOKEN_TTL;
+      const entry = { token: loginToken, expiry };
       spondTokens.set(account.email, entry);
       setSetting(`spond_token:${account.email}`, JSON.stringify(entry));
       setSetting(`spond_login_cooldown:${account.email}`, '0');
@@ -1009,7 +1036,12 @@ async function spondFetchAs(account: SpondAccount, endpoint: string, params?: Re
   // Drop it on 401 instead of serving the stale one until the local TTL runs out.
   if (res.status === 401) {
     clearStoredSpondToken(account.email);
-    throw new Error(`Spond API 401 — token rejected (${account.email})`);
+    // Dropping the token is not enough on its own: when it is rejected for a reason a fresh
+    // login cannot fix, every following poll logs in again and Spond counts those attempts
+    // until it locks the profile. So a rejected token arms the same brake the rate limit and
+    // the refused password already use.
+    setSetting(`spond_login_cooldown:${account.email}`, String(Date.now() + SPOND_LOGIN_COOLDOWN));
+    throw new Error(`Spond API 401 — token rejected (${account.email}), backing off ${SPOND_LOGIN_COOLDOWN / 60000} min`);
   }
   if (!res.ok) throw new Error(`Spond API ${res.status} (${account.email})`);
   return res.json();
@@ -1240,7 +1272,7 @@ async function translateTitles(titles: string[]): Promise<Record<string, string>
     const prompt = `Translate these Norwegian sports/event titles to Ukrainian. Keep proper names (places, people) as-is. Return a JSON object where keys are originals and values are translations.\n\n${untranslated.map((t, i) => `${i + 1}. "${t}"`).join('\n')}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: getGeminiModel(),
       contents: { parts: [{ text: prompt }] },
       config: { responseMimeType: 'application/json' },
     });
@@ -1407,6 +1439,56 @@ async function downloadTelegramFile(token: string, fileId: string): Promise<stri
     console.error('Failed to download file:', err);
   }
   return null;
+}
+
+/**
+ * Speech to text. Groq's whisper-large-v3 first, Gemini only as the fallback: on the same clip
+ * (26.08.2026) Whisper heard "Привіт, працюю зараз." while gemini-3.1-flash-lite heard
+ * "Тревіть працюю зараз." — a garbled transcript makes the bot write a WRONG event, which is
+ * worse than writing none.
+ */
+async function transcribeAudio(audioBase64: string, mimeType: string): Promise<string> {
+  const groqKey = getGroqKey();
+  if (groqKey) {
+    try {
+      const ext = mimeType.startsWith('video') ? 'mp4' : 'ogg';
+      const form = new FormData();
+      form.append('file', new Blob([Buffer.from(audioBase64, 'base64')], { type: mimeType }), `voice.${ext}`);
+      form.append('model', 'whisper-large-v3');
+      form.append('language', 'uk');
+      const res = await Promise.race([
+        fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${groqKey}` },
+          body: form,
+        }),
+        new Promise<Response>((_, reject) => setTimeout(() => reject(new Error('Groq timeout after 30s')), 30000)),
+      ]);
+      const data: any = await res.json();
+      if (data?.text) {
+        console.log('🎙️ Transcribed via Groq whisper-large-v3');
+        return String(data.text).trim();
+      }
+      console.error('🎙️ Groq transcription returned no text:', JSON.stringify(data).slice(0, 300));
+    } catch (err: any) {
+      console.error('🎙️ Groq transcription failed, falling back to Gemini:', err.message);
+    }
+  }
+
+  const ai = new GoogleGenAI({ apiKey: getGeminiKey() });
+  const resp = await Promise.race([
+    ai.models.generateContent({
+      model: getGeminiModel(),
+      contents: { parts: [
+        { inlineData: { data: audioBase64, mimeType } },
+        { text: 'Транскрибуй це аудіо українською. Напиши ТІЛЬКИ текст що сказано, нічого більше.' },
+      ]},
+      config: { thinkingConfig: { thinkingBudget: 0 } },
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Transcription timeout after 30s')), 30000)),
+  ]) as any;
+  console.log('🎙️ Transcribed via Gemini', getGeminiModel());
+  return resp.text?.trim() || '';
 }
 
 // Telegram API helpers
@@ -1786,19 +1868,8 @@ async function processMessage(update: any) {
       const mimeType = update.message.video_note ? 'video/mp4' : 'audio/ogg';
       try {
         const audioData = await downloadTelegramFile(telegramToken, fileId);
-        const ai = new GoogleGenAI({ apiKey: getGeminiKey() });
-        const transcribeResp = await Promise.race([
-          ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: { parts: [
-              { inlineData: { data: audioData, mimeType } },
-              { text: 'Транскрибуй це аудіо українською. Напиши ТІЛЬКИ текст що сказано.' },
-            ]},
-            config: { thinkingConfig: { thinkingBudget: 0 } },
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000)),
-        ]) as any;
-        answer = transcribeResp.text?.trim() || '';
+        if (!audioData) throw new Error('download failed');
+        answer = await transcribeAudio(audioData, mimeType);
         console.log('🤖 Follow-up voice transcribed:', answer);
       } catch (err: any) {
         console.error('🤖 Follow-up transcription failed:', err.message);
@@ -1901,18 +1972,7 @@ restrict: заборона/обмеження. Приклад: "Артему н�
       console.log('🤖 Step 1: Transcribing audio...');
       const mimeType = mediaType === 'video_note' ? 'video/mp4' : 'audio/ogg';
       try {
-        const transcribeResponse = await Promise.race([
-          ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: { parts: [
-              { inlineData: { data: audioBase64, mimeType } },
-              { text: 'Транскрибуй це аудіо українською. Напиши ТІЛЬКИ текст що сказано, нічого більше.' },
-            ]},
-            config: { thinkingConfig: { thinkingBudget: 0 } },
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Transcription timeout after 30s')), 30000)),
-        ]) as any;
-        transcribedText = transcribeResponse.text?.trim() || '';
+        transcribedText = await transcribeAudio(audioBase64, mimeType);
         console.log('🤖 Transcribed:', transcribedText);
       } catch (trErr: any) {
         console.error('🤖 Transcription failed:', trErr.message);
@@ -1928,7 +1988,7 @@ restrict: заборона/обмеження. Приклад: "Артему н�
     const parts: any[] = [{ text: 'Повідомлення від користувача: ' + transcribedText }];
 
     const geminiConfig = {
-      model: 'gemini-2.5-flash',
+      model: getGeminiModel(),
       contents: { parts },
       config: {
         systemInstruction: systemPrompt,
