@@ -53,9 +53,9 @@ sudo journalctl -u berbeha-calendar -f
 | Runtime | Bun |
 | Frontend | React 19, Vite 6, Tailwind CSS 4 |
 | Backend | Express 4, better-sqlite3 |
-| AI | Google Gemini 2.5 Flash (@google/genai) |
+| AI | Gemini via @google/genai (model is a SETTING) + Groq whisper-large-v3 for speech |
 | Bot | Telegram Bot API (long polling) |
-| Sports | Spond API (multi-account) |
+| Sports | Spond API (multi-account) — see **Spond auth** below |
 | Calendar | Google Calendar API (read-only) |
 | Photos | Google Photos Picker API |
 | Language | TypeScript 5.8 |
@@ -80,13 +80,38 @@ berbeha-calendar-telegram-bot/
 
 ## Gemini API (Critical Rules)
 
-- **Model**: `gemini-2.5-flash` (only one available; `gemini-2.0-flash` is deprecated/404)
+- **The model is a SETTING, never a constant** — `getGeminiModel()` reads `settings.gemini_model`
+  / `GEMINI_MODEL`, default `gemini-3.1-flash-lite`. Google retires a generation and the old id
+  starts answering `404 "no longer available to new users"`; that plus a revoked key is what left
+  the bot writing NO events from April to 26.08.2026 while looking alive. `gemini-2.5-flash` and
+  `-flash-lite` are already 404 for any key on a newer project, even though `/v1beta/models` still
+  lists them. Lite is the deliberate default: 500 free requests a day (full Flash gets 20) and it
+  accepts `thinkingBudget: 0`, which 3.x full Flash rejects outright.
+- **Speech does NOT go to Gemini first** — `transcribeAudio()` calls Groq `whisper-large-v3` and
+  falls back to Gemini. On one clip Whisper heard «Привіт, працюю зараз.» and Gemini Lite heard
+  «Тревіть працюю зараз.»; a garbled transcript writes a WRONG event, which is worse than none.
 - **NEVER use `responseSchema`** — causes 60s+ timeouts even with `thinkingBudget: 0`
 - Use only `responseMimeType: 'application/json'` with JSON format described in text prompt
 - Keep system prompts compact (no verbose examples)
 - **Audio processing**: 2 steps — (1) transcribe audio, (2) parse text into JSON separately
 - **Post-processing**: truncate titles > 50 chars, extract ISO timestamps from bloated fields
 - Handle `memberId` as array (Gemini sometimes returns `[2, 5]` instead of separate actions)
+
+---
+
+## Spond auth (Critical Rules)
+
+- The live route is **`POST /core/v1/auth2/login`** — `/core/v1/login` was retired and answers 404
+  with Spond's own JSON.
+- **`accessToken` in that reply is an OBJECT `{token, expiration}`, not a string.** Taking it as-is
+  sent the literal header `Bearer [object Object]`; every API call then answered 401, every 401
+  dropped the token, and the next poll logged in again. That storm is what got stuardbmw's profile
+  locked with `401 outOfLoginAttempts` — a lock Spond holds, which no amount of retrying clears.
+- Therefore **every refusal arms a cooldown**: 429 and non-JSON → 30 min, a refused password → 60
+  min, and a *rejected token on an API call* → 30 min. Never add a Spond path that can retry a
+  login without a brake; the kiosk polls the calendar every 10 minutes.
+- Tokens are persisted in `settings.spond_token:<email>` so a restart does not re-log-in, and the
+  expiry comes from the server's own `expiration`, refreshed a minute early.
 
 ---
 
@@ -97,7 +122,7 @@ Long polling (2s interval), `deleteWebhook` on startup.
 **Commands:** /start, /help, /events, /next, /prev, /today, /places
 
 **Processing pipeline:**
-1. Audio → Gemini transcription (30s timeout)
+1. Audio → `transcribeAudio()`: Groq whisper-large-v3, Gemini fallback (30s timeout each)
 2. Text → Gemini parsing with system prompt (60s timeout, 3 retries)
 3. Post-process: expand memberId arrays, merge split actions, fix bloated titles
 4. Unknown places → inline buttons (save as-is or add details)
@@ -107,7 +132,9 @@ Long polling (2s interval), `deleteWebhook` on startup.
 ## Environment Variables
 
 ```env
-GEMINI_API_KEY="..."              # Google AI (Gemini 2.5 Flash)
+GEMINI_API_KEY="..."              # Google AI Studio key (free tier is enough)
+GEMINI_MODEL="gemini-3.1-flash-lite"  # optional override; also settings.gemini_model
+GROQ_API_KEY="gsk_..."            # speech-to-text (whisper-large-v3)
 TELEGRAM_BOT_TOKEN="..."          # Telegram Bot API token
 APP_URL="https://..."             # Public app URL
 VITE_GOOGLE_CLIENT_ID="..."      # Google OAuth Client ID
