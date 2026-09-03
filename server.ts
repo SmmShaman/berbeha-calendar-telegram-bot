@@ -1399,6 +1399,14 @@ app.get('/api/spond/events', async (req, res) => {
           maxStartTimestamp: maxStart,
         });
         for (const e of accountEvents) {
+          // A fixture the club called off stays in Spond's list with `cancelled:true`
+          // (+ `cancelledReason`, e.g. «Denne er flyttet til 22.oktober»). Until 2026-09-03
+          // the flag was never read, so «Kolbu KK/Skreia – Kapp Lena Toten 2» stood on the
+          // kiosk a day after Spond had struck it out.
+          if (e.cancelled === true) {
+            console.log(`🏟️ Skipping cancelled: ${e.startTimestamp} «${e.heading}» — ${e.cancelledReason || ''}`);
+            continue;
+          }
           if (!eventMap.has(e.id)) eventMap.set(e.id, e);
         }
       } catch (err) {
