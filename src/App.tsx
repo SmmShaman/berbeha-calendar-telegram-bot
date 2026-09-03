@@ -27,6 +27,16 @@ type Member = {
   color: string;
 };
 
+// A Spond fixture carries two times: meet-up («Oppmøte 17:15», stored in `start_time`) and
+// kick-off (`activity_start`). Print the second only when it really differs.
+const kickoffLabel = (e: { start_time: string; activity_start?: string | null }): string => {
+  if (!e.activity_start) return '';
+  const a = new Date(e.activity_start).getTime();
+  const b = new Date(e.start_time).getTime();
+  if (isNaN(a) || isNaN(b) || Math.abs(a - b) < 5 * 60 * 1000) return '';
+  return format(new Date(a), 'HH:mm');
+};
+
 type CalendarEvent = {
   id: number;
   member_id: number;
@@ -39,6 +49,9 @@ type CalendarEvent = {
   _spond?: boolean;
   _ical?: boolean;
   original_title?: string;
+  // Spond only: `start_time` is the MEET-UP time (what the family has to plan around) and
+  // `activity_start` the kick-off/whistle, when the two differ.
+  activity_start?: string | null;
 };
 
 type Holiday = {
@@ -1429,6 +1442,7 @@ function CalendarApp({
                         const isSpond = !!event._spond;
                         const isTgBot = event.id >= 0; // local DB = added via Telegram bot
                         const time = format(new Date(event.start_time), 'HH:mm');
+                        const kick = kickoffLabel(event);
                         // Spond: teal for all members, Telegram: red, Google: green
                         const titleColor = isSpond ? '#0d9488' : isTgBot ? '#dc2626' : '#2e7d32';
                         const srcIcon = isSpond ? '⚽' : isGcal ? '📅' : '✏️';
@@ -1460,7 +1474,7 @@ function CalendarApp({
                             onClick={(e) => { e.stopPropagation(); setDetailEvent(event); }}
                           >
                             <div className="flex items-center truncate">
-                              <span className="mr-0.5 shrink-0 font-bold text-blue-600">{time}</span>
+                              <span className="mr-0.5 shrink-0 font-bold text-blue-600">{time}{kick && <span className="font-normal text-gray-500">→{kick}</span>}</span>
                               <span className="truncate font-semibold" style={{ color: titleColor }}>{event.title}</span>
                               {!useApi && isTgBot && (
                                 <button onClick={(e) => { e.stopPropagation(); deleteEvent(event.id); }}
@@ -1488,7 +1502,7 @@ function CalendarApp({
                             onClick={(e) => { e.stopPropagation(); setDetailEvent(event); }}
                           >
                             <span className="font-semibold" style={{ color: titleColor }}>{event.title}</span>
-                            {' '}<span className="font-bold text-blue-600">{time}</span>
+                            {' '}<span className="font-bold text-blue-600">{time}{kick && <span className="font-normal text-gray-500">→{kick}</span>}</span>
                             {event.location && <>{' '}<span className="text-orange-500">{shortLocation(event.location)}</span></>}
                           </div>
                         );
@@ -1649,6 +1663,7 @@ function CalendarApp({
                     <p className="text-sm text-slate-600">
                       {format(startDate, 'HH:mm')}
                       {endDate && ` — ${format(endDate, 'HH:mm')}`}
+                      {kickoffLabel(ev) && <span className="text-gray-500 font-normal"> · збір о {format(startDate, 'HH:mm')}, старт о {kickoffLabel(ev)}</span>}
                     </p>
                   </div>
                 </div>

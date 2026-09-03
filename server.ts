@@ -1363,6 +1363,24 @@ app.get('/api/spond/groups', async (req, res) => {
   }
 });
 
+// ─── Oslo wall-clock helpers ─────────────────────────────────
+// The bot used to tell the parser «Timezone: +01:00» all year round and to stamp its own
+// end times with the same literal — so every event dictated in summer time (late March to
+// late October) landed one hour late: «збори 17:30» was stored as 17:30+01:00 = 18:30 Oslo.
+// The offset must be COMPUTED for the date in question; Norway is +01:00 in winter and
+// +02:00 in summer.
+function osloOffset(d: Date): string {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Oslo', timeZoneName: 'longOffset' })
+    .formatToParts(d).find(p => p.type === 'timeZoneName')?.value || 'GMT+01:00';
+  const m = parts.match(/([+-])(\d{2}):?(\d{2})/);
+  return m ? `${m[1]}${m[2]}:${m[3]}` : '+01:00';
+}
+function osloIso(d: Date): string {
+  const f = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Oslo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  const wall = f.format(d).replace(' ', 'T'); // sv-SE gives YYYY-MM-DD HH:mm:ss
+  return `${wall}${osloOffset(d)}`;
+}
+
 // Get Spond events (with child-based mapping + translation, merged from all accounts)
 app.get('/api/spond/events', async (req, res) => {
   try {
@@ -1434,7 +1452,14 @@ app.get('/api/spond/events', async (req, res) => {
         member_id: memberId,
         title: translatedTitle,
         original_title: originalTitle,
-        start_time: e.startTimestamp,
+        // The Spond app shows the MEET-UP time («Oppmøte 17:15») and that is what a family
+        // calendar has to answer — when do we have to be there. `startTimestamp` is the
+        // kick-off/whistle, which can sit 5-60 minutes later; it travels as `activity_start`
+        // so the UI can print «17:15 (старт 18:00)». Spond's own Google sync writes the
+        // meet-up time too, so the two copies of one fixture now agree to the minute.
+        start_time: e.meetupTimestamp || e.startTimestamp,
+        activity_start: e.startTimestamp,
+        meetup_prior: e.meetupPrior || 0,
         end_time: e.endTimestamp,
         location: loc,
         spond_group_id: groupId,
@@ -1994,10 +2019,12 @@ async function processMessage(update: any) {
       ? eventTypesLib.map(e => `"${e.short_name}" → ${[e.full_name, e.default_location ? `місце: ${e.default_location}` : ''].filter(Boolean).join(', ')}, ${e.default_duration_min} хв`).join('\n')
       : '';
 
-    const systemPrompt = `Парсер сімейного календаря. Зараз: ${new Date().toISOString()}. Timezone: +01:00.
+    const tzOff = osloOffset(new Date());
+    const systemPrompt = `Парсер сімейного календаря. Зараз: ${osloIso(new Date())} (Осло). Timezone: ${tzOff} — усі часи в цьому зміщенні.
 Сім'я: ${membersList}.
-${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JSON: {"transcription":"текст","actions":[{"action":"add","memberId":N,"title":"1-2 слова","startTime":"ISO8601+01:00","endTime":"ISO8601+01:00","location":"місце"}]}
-Дії: add, delete(eventId), reschedule(eventId,newStartTime), query(memberId,period), restrict(memberId,title,days).
+${eventsContext ? `Події:\n${eventsContext}\n` : ''}Відповідай JSON: {"transcription":"текст","actions":[{"action":"add","memberId":N,"title":"1-2 слова","startTime":"ISO8601${tzOff}","endTime":"ISO8601${tzOff}","location":"місце"}]}
+Дії: add, delete(eventId), reschedule(eventId,newStartTime,newEndTime,location), query(memberId,period), restrict(memberId,title,days).
+delete і reschedule ЗАВЖДИ вказують eventId зі списку «Події» (число в квадратних дужках). Якщо просять виправити час або місце існуючої події — це reschedule з eventId, а не add.
 restrict: заборона/обмеження. Приклад: "Артему не можна плейстейшн 19 днів" → {"action":"restrict","memberId":N,"title":"плейстейшн","days":19}. Заборони НЕ є подіями!
 Для кожної людини — окрема action з УСІМА полями. endTime = startTime + 1 година якщо не вказано.`;
 
@@ -2156,9 +2183,7 @@ restrict: заборона/обмеження. Приклад: "Артему н�
           // Generate endTime if missing but startTime exists
           if (act.startTime && !act.endTime) {
             try {
-              const start = new Date(act.startTime);
-              start.setHours(start.getHours() + 1);
-              act.endTime = start.toISOString().replace('Z', '+01:00');
+              act.endTime = osloIso(new Date(new Date(act.startTime).getTime() + 3600_000));
             } catch {}
           }
         }
@@ -2269,6 +2294,43 @@ restrict: заборона/обмеження. Приклад: "Артему н�
         return;
       }
 
+      // The parser is asked for an eventId, but a small model often answers a delete or a
+      // reschedule with the TITLE it heard instead («Виправ Лена … на 17.30» came back as
+      // {action:'reschedule', title:'Збори школа', memberId:5, startTime:…} and was silently
+      // ignored). Resolve it here: same member (when named), the closest title, nearest date.
+      const normT = (t: string) => (t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const resolveEventId = (act: any): number | null => {
+        if (act.eventId && existingEvents.some(e => e.id === act.eventId)) return act.eventId;
+        const want = normT(act.title || act.eventTitle || act.name || '');
+        if (!want) return null;
+        const wantWords = want.split(' ').filter(w => w.length > 2);
+        const scored = existingEvents
+          .filter(e => !act.memberId || e.member_id === act.memberId)
+          .map(e => {
+            const have = normT(e.title);
+            const hit = wantWords.filter(w => have.includes(w)).length;
+            const haveWords = have.split(' ').filter(w => w.length > 2);
+            const back = haveWords.filter(w => want.includes(w)).length;
+            const score = Math.max(hit / Math.max(1, wantWords.length), back / Math.max(1, haveWords.length));
+            const ref = act.date || act.startTime || act.newStartTime;
+            const dist = ref ? Math.abs(new Date(e.start_time).getTime() - new Date(ref).getTime()) : Math.abs(new Date(e.start_time).getTime() - Date.now());
+            return { id: e.id, score, dist };
+          })
+          .filter(x => x.score >= 0.5)
+          .sort((a, b) => b.score - a.score || a.dist - b.dist);
+        return scored[0]?.id ?? null;
+      };
+      for (const act of actions) {
+        if ((act.action === 'delete' || act.action === 'reschedule') && !existingEvents.some(e => e.id === act.eventId)) {
+          const found = resolveEventId(act);
+          if (found) { console.log(`🤖 Resolved ${act.action} → event ${found} from title «${act.title || ''}»`); act.eventId = found; }
+        }
+        if (act.action === 'reschedule') {
+          if (!act.newStartTime && act.startTime) act.newStartTime = act.startTime;
+          if (!act.newEndTime && act.endTime) act.newEndTime = act.endTime;
+        }
+      }
+
       const lines: string[] = [];
       const deleteIds: number[] = [];
       const deleteEventLines: string[] = [];
@@ -2318,26 +2380,55 @@ restrict: заборона/обмеження. Приклад: "Артему н�
           lines.push(`✅ <b>Додано:</b> ${act.title}\n👤 ${memberName}\n🕐 ${dateStr}${location ? `\n📍 ${location}` : '\n📍 <i>місце не вказано</i>'}`);
         }
 
-        if (act.action === 'delete' && act.eventId) {
-          const event = db.prepare('SELECT e.*, m.name as member_name FROM events e LEFT JOIN members m ON e.member_id = m.id WHERE e.id = ?').get(act.eventId) as any;
+        if (act.action === 'delete') {
+          const event = act.eventId
+            ? db.prepare('SELECT e.*, m.name as member_name FROM events e LEFT JOIN members m ON e.member_id = m.id WHERE e.id = ?').get(act.eventId) as any
+            : null;
           if (event) {
             deleteIds.push(event.id);
             const dateStr = new Date(event.start_time).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
             deleteEventLines.push(`📌 ${event.title} — ${event.member_name || 'Сім\'я'} | 🕐 ${dateStr}`);
           } else {
-            lines.push(`⚠️ Подію з ID ${act.eventId} не знайдено.`);
+            // Only hand-dictated events live in `events`. A training or a fixture comes from
+            // Spond (or its Google mirror) and can only be removed THERE — say so instead of
+            // a bare «не знайдено», which reads as a broken bot.
+            const want = normT(act.title || '');
+            const foreign = want ? (db.prepare(
+              `SELECT title, start_time FROM ical_events WHERE start_time >= ? ORDER BY start_time ASC LIMIT 400`
+            ).all(new Date(Date.now() - 86400000).toISOString()) as any[]).find(e => {
+              const have = normT(e.title);
+              return have.includes(want) || want.split(' ').filter(w => w.length > 2).every(w => have.includes(w));
+            }) : null;
+            if (foreign) {
+              const dateStr = new Date(foreign.start_time).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
+              lines.push(`⚠️ <b>${foreign.title}</b> (${dateStr}) прийшла зі Spond / Google-календаря — бот може видаляти лише події, надиктовані йому. Видали її у Spond або в Google Calendar, і вона зникне звідси за ~15 хв.`);
+            } else {
+              lines.push(`⚠️ Не знайшов серед надиктованих подій${act.title ? ` «${act.title}»` : act.eventId ? ` (ID ${act.eventId})` : ''}. Натисни /events, щоб побачити список.`);
+            }
           }
         }
 
-        if (act.action === 'reschedule' && act.eventId) {
-          const event = db.prepare('SELECT e.*, m.name as member_name FROM events e LEFT JOIN members m ON e.member_id = m.id WHERE e.id = ?').get(act.eventId) as any;
-          if (event && act.newStartTime) {
-            db.prepare('UPDATE events SET start_time = ?, end_time = ? WHERE id = ?')
-              .run(act.newStartTime, act.newEndTime || act.newStartTime, act.eventId);
+        if (act.action === 'reschedule') {
+          const event = act.eventId
+            ? db.prepare('SELECT e.*, m.name as member_name FROM events e LEFT JOIN members m ON e.member_id = m.id WHERE e.id = ?').get(act.eventId) as any
+            : null;
+          if (!event) {
+            lines.push(`⚠️ Не знайшов серед надиктованих подій${act.title ? ` «${act.title}»` : ''}, щоб перенести. Натисни /events, щоб побачити список.`);
+          } else if (act.newStartTime || act.location) {
+            const newStart = act.newStartTime || event.start_time;
+            let newEnd = act.newEndTime || (act.newStartTime ? osloIso(new Date(new Date(newStart).getTime() + Math.max(3600_000, new Date(event.end_time).getTime() - new Date(event.start_time).getTime()))) : event.end_time);
+            if (new Date(newEnd).getTime() <= new Date(newStart).getTime()) newEnd = osloIso(new Date(new Date(newStart).getTime() + 3600_000));
+            const newLoc = act.location || event.location;
+            db.prepare('UPDATE events SET start_time = ?, end_time = ?, location = ? WHERE id = ?')
+              .run(newStart, newEnd, newLoc, event.id);
 
             const oldDate = new Date(event.start_time).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
-            const newDate = new Date(act.newStartTime).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
-            lines.push(`📅 <b>Перенесено:</b> ${event.title} — ${event.member_name || 'Сім\'я'}\n<s>${oldDate}</s> → ${newDate}`);
+            const newDate = new Date(newStart).toLocaleString('uk-UA', { timeZone: 'Europe/Oslo', dateStyle: 'medium', timeStyle: 'short' });
+            const timeLine = newStart !== event.start_time ? `\n<s>${oldDate}</s> → ${newDate}` : `\n🕐 ${oldDate}`;
+            const locLine = act.location && act.location !== event.location ? `\n📍 <s>${event.location || '—'}</s> → ${newLoc}` : '';
+            lines.push(`📅 <b>${newStart !== event.start_time ? 'Перенесено' : 'Виправлено'}:</b> ${event.title} — ${event.member_name || 'Сім\'я'}${timeLine}${locLine}`);
+          } else {
+            lines.push(`⚠️ Для «${event.title}» не почув нового часу чи місця.`);
           }
         }
 
@@ -2521,14 +2612,32 @@ restrict: заборона/обмеження. Приклад: "Артему н�
 
 // Polling loop
 let lastUpdateId = 0;
+let lastPollErrorLog = 0;
 
 async function pollTelegram() {
   const token = getSetting('telegram_token');
   if (!token) return;
 
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=3`);
+    // `allowed_updates` is REMEMBERED by Telegram per bot (whatever the last consumer asked
+    // for stays in force). On 2026-09-03 the bot's stored list was message/channel_post/
+    // my_chat_member/chat_member/chat_join_request — no `callback_query` — so every tap on
+    // «✅ Так, видалити» was dropped by Telegram before it ever reached this loop, and the
+    // three «Зустріч з татом» rows the owner deleted on 26.08 were still in the table.
+    // Ask for exactly what this bot handles on every call, so no other tool can starve it.
+    const allowed = encodeURIComponent(JSON.stringify(['message', 'callback_query']));
+    const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=3&allowed_updates=${allowed}`);
     const data = await res.json();
+
+    if (!data.ok) {
+      // 409 = another process is polling with the same token; before, this was swallowed.
+      const now = Date.now();
+      if (now - lastPollErrorLog > 5 * 60_000) {
+        lastPollErrorLog = now;
+        console.error(`🤖 Telegram getUpdates refused: ${res.status} ${JSON.stringify(data).slice(0, 200)}`);
+      }
+      return;
+    }
 
     if (data.ok && data.result.length > 0) {
       for (const update of data.result) {
