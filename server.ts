@@ -1133,6 +1133,16 @@ async function getAllSpondGroups(): Promise<any[]> {
 }
 
 // Find all children of all logged-in parents across all groups (multi-account)
+// group id → the GROUP-MEMBER ids of our own children in it. Spond answers an event with
+// member ids (`responses.declinedIds`), not profile ids, and one child has a different
+// member id in every group — so this is the only key that can say «Єгор has declined».
+const ourGroupMemberIds = new Map<string, Set<string>>();
+const noteOurMember = (groupId: string, memberId: string) => {
+  if (!groupId || !memberId) return;
+  if (!ourGroupMemberIds.has(groupId)) ourGroupMemberIds.set(groupId, new Set());
+  ourGroupMemberIds.get(groupId)!.add(memberId);
+};
+
 async function findMyChildren(): Promise<Map<string, { profileId: string; firstName: string; lastName: string; groups: { id: string; name: string }[] }>> {
   const accounts = getSpondAccounts();
   if (!accounts.length) return new Map();
@@ -1181,6 +1191,7 @@ async function findMyChildren(): Promise<Map<string, { profileId: string; firstN
       const isMyChild = (member.guardians || []).some(
         (g: any) => parentProfileIds.has(g.profile?.id) || parentProfileIds.has(g.id)
       );
+      if (isMyChild) noteOurMember(group.id, member.id);
       if (isMyChild && member.profile?.id) {
         const pid = member.profile.id;
         if (!childrenMap.has(pid)) {
@@ -1231,6 +1242,7 @@ async function findMyChildren(): Promise<Map<string, { profileId: string; firstN
           (memberLastNameLat.includes(parentLastNameLat) || parentLastNameLat.includes(memberLastNameLat) ||
            memberLastNameLat.split(/[\s-]/).some((part: string) => part.length >= 3 && parentLastNameLat.includes(part)));
         if (match) {
+          noteOurMember(group.id, member.id);
           const pid = member.profile?.id || member.id;
           if (!childrenMap.has(pid)) {
             childrenMap.set(pid, { profileId: pid, firstName: member.firstName, lastName: member.lastName, groups: [] });
@@ -1403,10 +1415,10 @@ app.get('/api/spond/events', async (req, res) => {
           // (+ `cancelledReason`, e.g. «Denne er flyttet til 22.oktober»). Until 2026-09-03
           // the flag was never read, so «Kolbu KK/Skreia – Kapp Lena Toten 2» stood on the
           // kiosk a day after Spond had struck it out.
-          if (e.cancelled === true) {
-            console.log(`🏟️ Skipping cancelled: ${e.startTimestamp} «${e.heading}» — ${e.cancelledReason || ''}`);
-            continue;
-          }
+          // It is KEPT and flagged (`cancelled`), the way Spond itself shows it struck
+          // out — the owner's rule of 2026-09-03: a called-off event should be seen as
+          // called off, not vanish, so nobody wonders where the training went.
+          if (e.cancelled === true) console.log(`🏟️ Cancelled: ${e.startTimestamp} «${e.heading}» — ${e.cancelledReason || ''}`);
           if (!eventMap.has(e.id)) eventMap.set(e.id, e);
         }
       } catch (err) {
@@ -1455,6 +1467,14 @@ app.get('/api/spond/events', async (req, res) => {
       const originalTitle = e.heading || '(Без назви)';
       const translatedTitle = translations[originalTitle] || originalTitle;
 
+      // «Не йде»: the parents answered «kan ikke» for our child (Єгор's Thursday training
+      // on a match day, 2026-09-03). The training itself is alive — Spond greys it out
+      // for him and so do we. Declined only when EVERY one of our children in the group
+      // has declined; one brother going and one not stays a normal chip.
+      const ours = ourGroupMemberIds.get(groupId);
+      const declinedIds: string[] = e.responses?.declinedIds || [];
+      const declined = !!(ours && ours.size > 0 && [...ours].every(id => declinedIds.includes(id)));
+
       return {
         id: -(10000 + i),
         member_id: memberId,
@@ -1470,6 +1490,9 @@ app.get('/api/spond/events', async (req, res) => {
         meetup_prior: e.meetupPrior || 0,
         end_time: e.endTimestamp,
         location: loc,
+        cancelled: e.cancelled === true,
+        cancelled_reason: e.cancelled === true ? String(e.cancelledReason || '') : '',
+        declined,
         spond_group_id: groupId,
         spond_group_name: e.recipients?.group?.name || '',
         _spond: true,
@@ -2590,7 +2613,8 @@ restrict: заборона/обмеження. Приклад: "Артему н�
               const src = e._spond ? '⚽' : '✏️';
               const loc = e.location ? ` 📍 ${e.location}` : '';
               const who = e.member_name || memberName;
-              return `${src} <b>${d}</b> — ${e.title} (${who})${loc}`;
+              const off = e.cancelled ? ` ❌ <i>скасовано${e.cancelled_reason ? `: ${e.cancelled_reason}` : ''}</i>` : e.declined ? ' ❌ <i>не йде</i>' : '';
+              return `${src} <b>${d}</b> — ${off ? `<s>${e.title}</s>` : e.title} (${who})${loc}${off}`;
             });
             lines.push(`📅 <b>Розклад ${memberName} (${periodLabel}):</b>\n\n${eventLines.join('\n')}`);
           }

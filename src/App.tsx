@@ -52,6 +52,11 @@ type CalendarEvent = {
   // Spond only: `start_time` is the MEET-UP time (what the family has to plan around) and
   // `activity_start` the kick-off/whistle, when the two differ.
   activity_start?: string | null;
+  // Spond only: the club called it off (`cancelled`, with its reason) or the parents answered
+  // «kan ikke» for our child (`declined`). Either way the chip stays, grey and struck through.
+  cancelled?: boolean;
+  cancelled_reason?: string;
+  declined?: boolean;
 };
 
 type Holiday = {
@@ -1449,12 +1454,16 @@ function CalendarApp({
                         const borderColor = isSpond ? '#0d9488' : isTgBot ? '#dc2626' : '#4caf50';
                         const bgColor = isSpond ? '#f0fdfa' : isTgBot ? '#fef2f2' : '#e8f5e9';
                         const bgColorFar = isSpond ? '#f0fdfa' : isTgBot ? '#fef2f2' : '#e8f5e9';
+                        const offLabel = event.cancelled
+                          ? `❌ Скасовано${event.cancelled_reason ? `: ${event.cancelled_reason}` : ''}`
+                          : event.declined ? '❌ Не йде (відповідь у Spond)' : '';
                         const tooltipParts = [
                           srcIcon,
                           time,
                           event.title,
                           event.location ? `📍 ${event.location}` : '',
                           isSpond ? '(Spond)' : isTgBot ? '(Telegram)' : '(Google)',
+                          offLabel,
                         ].filter(Boolean).join(' ');
 
                         // Today: enlarged fonts
@@ -1467,15 +1476,16 @@ function CalendarApp({
                             key={event.id}
                             className={cn("group px-0.5 py-px rounded-[2px] font-medium leading-tight max-w-full flex flex-col cursor-pointer", todayFont)}
                             style={{
-                              backgroundColor: bgColor,
-                              borderLeft: `2px solid ${borderColor}`
+                              backgroundColor: offLabel ? '#f3f4f6' : bgColor,
+                              borderLeft: `2px solid ${offLabel ? '#9ca3af' : borderColor}`,
+                              opacity: offLabel ? 0.75 : 1,
                             }}
                             title={tooltipParts}
                             onClick={(e) => { e.stopPropagation(); setDetailEvent(event); }}
                           >
                             <div className="flex items-center truncate">
-                              <span className="mr-0.5 shrink-0 font-bold text-blue-600">{time}{kick && <span className="font-normal text-gray-500">→{kick}</span>}</span>
-                              <span className="truncate font-semibold" style={{ color: titleColor }}>{event.title}</span>
+                              <span className={`mr-0.5 shrink-0 font-bold ${offLabel ? 'text-gray-400 line-through' : 'text-blue-600'}`}>{time}{kick && <span className="font-normal text-gray-500">→{kick}</span>}</span>
+                              <span className={`truncate font-semibold ${offLabel ? 'line-through' : ''}`} style={{ color: offLabel ? '#6b7280' : titleColor }}>{event.title}</span>
                               {!useApi && isTgBot && (
                                 <button onClick={(e) => { e.stopPropagation(); deleteEvent(event.id); }}
                                   className="hidden group-hover:inline-flex ml-auto p-px rounded hover:bg-red-100 text-red-400 hover:text-red-600">
@@ -1495,14 +1505,15 @@ function CalendarApp({
                             key={event.id}
                             className="group px-0.5 py-px rounded-[2px] text-[7px] md:text-[9px] font-medium leading-tight max-w-full truncate cursor-pointer"
                             style={{
-                              backgroundColor: bgColorFar,
-                              borderLeft: `2px solid ${borderColor}`
+                              backgroundColor: offLabel ? '#f3f4f6' : bgColorFar,
+                              borderLeft: `2px solid ${offLabel ? '#9ca3af' : borderColor}`,
+                              opacity: offLabel ? 0.75 : 1
                             }}
                             title={tooltipParts}
                             onClick={(e) => { e.stopPropagation(); setDetailEvent(event); }}
                           >
-                            <span className="font-semibold" style={{ color: titleColor }}>{event.title}</span>
-                            {' '}<span className="font-bold text-blue-600">{time}{kick && <span className="font-normal text-gray-500">→{kick}</span>}</span>
+                            <span className={`font-semibold ${offLabel ? 'line-through' : ''}`} style={{ color: offLabel ? '#6b7280' : titleColor }}>{event.title}</span>
+                            {' '}<span className={`font-bold ${offLabel ? 'text-gray-400 line-through' : 'text-blue-600'}`}>{time}{kick && <span className="font-normal text-gray-500">→{kick}</span>}</span>
                             {event.location && <>{' '}<span className="text-orange-500">{shortLocation(event.location)}</span></>}
                           </div>
                         );
@@ -1664,6 +1675,7 @@ function CalendarApp({
                       {format(startDate, 'HH:mm')}
                       {endDate && ` — ${format(endDate, 'HH:mm')}`}
                       {kickoffLabel(ev) && <span className="text-gray-500 font-normal"> · збір о {format(startDate, 'HH:mm')}, старт о {kickoffLabel(ev)}</span>}
+                      {(ev.cancelled || ev.declined) && <div className="mt-1 text-sm font-semibold text-red-600">{ev.cancelled ? `❌ Скасовано${ev.cancelled_reason ? `: ${ev.cancelled_reason}` : ''}` : '❌ Не йде — так відповіли у Spond'}</div>}
                     </p>
                   </div>
                 </div>
