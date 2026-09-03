@@ -137,8 +137,8 @@ if (countMembers.count === 0) {
 
 // ─── Places & Event Types library helpers ────────────────────
 
-function getPlacesLibrary(): { short_name: string; full_name: string; address: string; description: string }[] {
-  return db.prepare('SELECT short_name, full_name, address, description FROM places').all() as any[];
+function getPlacesLibrary(): { id: number; short_name: string; full_name: string; address: string; description: string }[] {
+  return db.prepare('SELECT id, short_name, full_name, address, description FROM places').all() as any[];
 }
 
 function getEventTypesLibrary(): { short_name: string; full_name: string; default_location: string; default_duration_min: number }[] {
@@ -1555,11 +1555,15 @@ async function transcribeAudio(audioBase64: string, mimeType: string): Promise<s
 async function tgSend(token: string, chatId: string, text: string, replyMarkup?: any) {
   const body: any = { chat_id: chatId, text, parse_mode: 'HTML' };
   if (replyMarkup) body.reply_markup = JSON.stringify(replyMarkup);
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  // A refused send used to vanish: Telegram answers 400 when a button's callback_data
+  // exceeds 64 BYTES (a Cyrillic place name of ~25 letters already does), and the whole
+  // message — question and buttons alike — is silently never delivered.
+  if (!res.ok) console.error(`🤖 Telegram sendMessage refused: ${res.status} ${(await res.text()).slice(0, 200)}`);
 }
 
 async function tgAnswer(token: string, callbackQueryId: string, text?: string) {
@@ -1573,11 +1577,12 @@ async function tgAnswer(token: string, callbackQueryId: string, text?: string) {
 async function tgEditMessage(token: string, chatId: string, messageId: number, text: string, replyMarkup?: any) {
   const body: any = { chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML' };
   if (replyMarkup) body.reply_markup = JSON.stringify(replyMarkup);
-  await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+  const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (!res.ok) console.error(`🤖 Telegram editMessageText refused: ${res.status} ${(await res.text()).slice(0, 200)}`);
 }
 
 // ─── Callback Query Handler (inline buttons) ────────────────
@@ -1592,9 +1597,14 @@ async function processCallbackQuery(update: any) {
   const data = cb.data;
 
   // del_place:NAME — delete a place from library
+  const placeRowFromPayload = (payload: string): any =>
+    /^\d+$/.test(payload)
+      ? db.prepare('SELECT * FROM places WHERE id = ?').get(parseInt(payload, 10))
+      : db.prepare('SELECT * FROM places WHERE short_name = ?').get(payload);
   if (data.startsWith('del_place:')) {
-    const placeName = data.substring('del_place:'.length);
-    try { db.prepare('DELETE FROM places WHERE short_name = ?').run(placeName); } catch {}
+    const row = placeRowFromPayload(data.substring('del_place:'.length));
+    const placeName = row ? row.short_name : data.substring('del_place:'.length);
+    try { if (row) db.prepare('DELETE FROM places WHERE id = ?').run(row.id); } catch {}
     await tgEditMessage(telegramToken, chatId, messageId,
       `🗑 Місце <b>${placeName}</b> видалено з бібліотеки.`
     );
@@ -1604,7 +1614,8 @@ async function processCallbackQuery(update: any) {
 
   // edit_place:NAME — edit place description
   if (data.startsWith('edit_place:')) {
-    const placeName = data.substring('edit_place:'.length);
+    const row = placeRowFromPayload(data.substring('edit_place:'.length));
+    const placeName = row ? row.short_name : data.substring('edit_place:'.length);
     pendingFollowUp.set(chatId, { type: 'place', name: placeName, eventId: 0 });
     await tgEditMessage(telegramToken, chatId, messageId,
       `📝 <b>Опиши "${placeName}":</b>\n\nНапиши або надиктуй опис місця.`
@@ -1614,8 +1625,26 @@ async function processCallbackQuery(update: any) {
   }
 
   // place_ok:NAME — user confirmed place is fine as-is
+  // Button payloads carry the EVENT ID and the place name is read back from the row:
+  // callback_data is capped at 64 bytes and «place_detail:Лені, Тотен-Ідрець парк:53» is
+  // already over it. A legacy name-payload (messages sent before 2026-09-03) still works.
+  const placeFromPayload = (payload: string): { name: string; eventId: number } => {
+    if (/^\d+$/.test(payload)) {
+      const ev = db.prepare('SELECT id, location FROM events WHERE id = ?').get(parseInt(payload, 10)) as any;
+      return { name: ev ? String(ev.location || '').replace(/\s*\(.*\)$/, '') : '', eventId: ev ? ev.id : 0 };
+    }
+    const colonIdx = payload.lastIndexOf(':');
+    const tail = colonIdx >= 0 ? payload.substring(colonIdx + 1) : '';
+    if (colonIdx >= 0 && /^\d+$/.test(tail)) return { name: payload.substring(0, colonIdx), eventId: parseInt(tail, 10) };
+    return { name: payload, eventId: 0 };
+  };
   if (data.startsWith('place_ok:')) {
-    const placeName = data.substring('place_ok:'.length);
+    const placeName = placeFromPayload(data.substring('place_ok:'.length)).name;
+    if (!placeName) {
+      await tgEditMessage(telegramToken, chatId, messageId, '⚠️ Подію вже не знайти — місце не збережено.');
+      await tgAnswer(telegramToken, cb.id);
+      return;
+    }
     addPlace(placeName, '', '', '');
     await tgEditMessage(telegramToken, chatId, messageId,
       `📚 <b>Збережено місце:</b> ${placeName}`
@@ -1626,10 +1655,12 @@ async function processCallbackQuery(update: any) {
 
   // place_detail:NAME:EVENT_ID — user wants to add details for place
   if (data.startsWith('place_detail:')) {
-    const parts = data.substring('place_detail:'.length);
-    const colonIdx = parts.lastIndexOf(':');
-    const placeName = parts.substring(0, colonIdx);
-    const eventId = parseInt(parts.substring(colonIdx + 1), 10);
+    const { name: placeName, eventId } = placeFromPayload(data.substring('place_detail:'.length));
+    if (!placeName) {
+      await tgEditMessage(telegramToken, chatId, messageId, '⚠️ Подію вже не знайти. Скажи «виправ місце для <подія> на <місце>» — і я оновлю.');
+      await tgAnswer(telegramToken, cb.id);
+      return;
+    }
     pendingFollowUp.set(chatId, { type: 'place', name: placeName, eventId });
     await tgEditMessage(telegramToken, chatId, messageId,
       `📝 <b>Опиши "${placeName}":</b>\n\n` +
@@ -1903,8 +1934,8 @@ async function processMessage(update: any) {
       }).join('\n');
       const buttons = {
         inline_keyboard: places.map(p => ([
-          { text: `🗑 ${p.short_name}`, callback_data: `del_place:${p.short_name}` },
-          { text: `📝 ${p.short_name}`, callback_data: `edit_place:${p.short_name}` },
+          { text: `🗑 ${p.short_name}`, callback_data: `del_place:${p.id}` },
+          { text: `📝 ${p.short_name}`, callback_data: `edit_place:${p.id}` },
         ])),
       };
       await sendMessage(`📚 <b>Бібліотека місць (${places.length}):</b>\n\n${list}`, buttons);
@@ -2590,10 +2621,10 @@ restrict: заборона/обмеження. Приклад: "Артему н�
           const buttons = {
             inline_keyboard: [
               [
-                { text: `✅ Так, "${unknown.name}" — ок`, callback_data: `place_ok:${unknown.name}` },
+                { text: `✅ Так, "${unknown.name}" — ок`, callback_data: `place_ok:${unknown.eventId}` },
               ],
               [
-                { text: '📝 Уточнити деталі', callback_data: `place_detail:${unknown.name}:${unknown.eventId}` },
+                { text: '📝 Уточнити деталі', callback_data: `place_detail:${unknown.eventId}` },
               ],
             ],
           };
